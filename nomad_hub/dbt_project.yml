@@ -1,0 +1,68 @@
+name: 'nomad_hub'
+version: '1.0.0'
+config-version: 2
+
+profile: 'nomad_hub'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# ── Global model configuration ─────────────────────────────────────────────────
+models:
+  nomad_hub:
+
+    # Silver layer — staging views
+    staging:
+      +schema: STAGING
+      +materialized: view
+      +tags: ["staging", "silver"]
+
+    # Gold layer — marts
+    marts:
+      +schema: MARTS
+      +tags: ["marts", "gold"]
+
+      dimensions:
+        +materialized: table
+        +tags: ["dimension"]
+
+      facts:
+        +materialized: incremental
+        +incremental_strategy: merge
+        +tags: ["fact", "incremental"]
+
+      business_marts:
+        +materialized: table
+        +tags: ["mart"]
+
+      ai:
+        +schema: AI
+        +materialized: table
+        +tags: ["ai"]
+
+# ── Snapshot configuration ─────────────────────────────────────────────────────
+snapshots:
+  nomad_hub:
+    +target_schema: MARTS
+    +strategy: timestamp
+    +updated_at: updated_at
+
+# ── Seeds ──────────────────────────────────────────────────────────────────────
+seeds:
+  nomad_hub:
+    +schema: RAW
+
+# ── Variables ─────────────────────────────────────────────────────────────────
+vars:
+  # Lookback window for incremental models (overrideable at runtime)
+  incremental_lookback_days: 3
+  # Start date for date spine
+  date_spine_start: '2021-01-01'

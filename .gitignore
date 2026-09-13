@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+ENV/
+
+# Environment / secrets — NEVER commit these
+*.env
+!example.env
+.secrets
+credentials.json
+secrets/
+
+# dbt
+nomad_hub/target/
+nomad_hub/dbt_packages/
+nomad_hub/logs/
+nomad_hub/.user.yml
+
+# Airflow
+airflow/logs/
+airflow/plugins/
+airflow/dags/__pycache__/
+
+# Data files — too large for git
+data/*.csv
+data/*.parquet
+data/*.json.gz
+!data/sample_*.csv
+
+# FAISS index
+ai/review_vectors.faiss
+ai/review_vectors.pkl
+ai/*.index
+
+# Streamlit cache
+streamlit/.streamlit/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.nfs*
+
+# VS Code / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Docker
+.docker/
+
+# Terraform (if used for AWS)
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# GitHub Actions artifacts
+.github/artifacts/

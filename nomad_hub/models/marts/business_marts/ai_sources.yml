@@ -1,0 +1,17 @@
+version: 2
+
+sources:
+  - name: ai
+    database: NOMAD_HUB
+    schema: AI
+    description: "AI layer — Gemini-enriched tables"
+    tables:
+      - name: review_enriched
+        description: "Gemini 1.5 Flash enriched review table (written by ai/enrich_reviews.py)"
+        columns:
+          - name: REVIEW_ID
+            tests: [unique, not_null]
+          - name: AI_SENTIMENT
+            tests:
+              - accepted_values:
+                  values: ["positive", "neutral", "negative"]

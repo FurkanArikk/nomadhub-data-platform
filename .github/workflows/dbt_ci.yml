@@ -1,0 +1,65 @@
+name: dbt CI — Compile & Test
+
+on:
+  pull_request:
+    paths:
+      - "nomad_hub/**"
+      - ".github/workflows/dbt_ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "nomad_hub/**"
+
+jobs:
+  dbt-compile:
+    name: dbt compile + schema validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nomad_hub
+
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER:    ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dbt-snowflake
+        run: pip install dbt-snowflake==1.8.0
+
+      - name: Copy profiles template
+        run: |
+          mkdir -p ~/.dbt
+          cp profiles.yml.example ~/.dbt/profiles.yml
+
+      - name: dbt deps
+        run: dbt deps
+
+      - name: dbt compile (no Snowflake needed)
+        run: dbt compile --profiles-dir ~/.dbt --target dev
+
+      - name: dbt source freshness check (modified only, on main)
+        if: github.ref == 'refs/heads/main'
+        run: dbt source freshness --profiles-dir ~/.dbt --target dev
+
+  lint:
+    name: Python linting (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint Python files
+        run: ruff check data/ aws/ ai/ streamlit/ airflow/dags/
