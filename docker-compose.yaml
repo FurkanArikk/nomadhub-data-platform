@@ -1,0 +1,155 @@
+name: nomadhub-platform
+
+services:
+  # ==========================================
+  # 1. Airflow Orchestration Layer
+  # ==========================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: nomadhub-postgres
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER:-airflow}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME:-airflow}
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${AIRFLOW_DB_USER:-airflow}"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - nomadhub-net
+
+  airflow-init:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    container_name: nomadhub-airflow-init
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create
+          --username admin
+          --password admin
+          --firstname Admin
+          --lastname User
+          --role Admin
+          --email admin@nomad-hub.local || true
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - nomadhub-net
+
+  airflow-webserver:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    container_name: nomadhub-airflow-webserver
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      PYTHONPATH: /opt/airflow
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./ai:/opt/airflow/ai
+      - ./nomad_hub:/opt/airflow/nomad_hub
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - nomadhub-net
+
+  airflow-scheduler:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    container_name: nomadhub-airflow-scheduler
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
+      PYTHONPATH: /opt/airflow
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./ai:/opt/airflow/ai
+      - ./nomad_hub:/opt/airflow/nomad_hub
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - nomadhub-net
+
+  # ==========================================
+  # 2. Streamlit & AI Dashboard Layer
+  # ==========================================
+  streamlit:
+    build:
+      context: .
+      dockerfile: streamlit/Dockerfile
+    container_name: nomadhub-streamlit
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      STREAMLIT_SERVER_PORT: 8501
+      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
+    volumes:
+      - ./streamlit:/app/streamlit
+      - ./ai:/app/ai
+      - ./data:/app/data
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    networks:
+      - nomadhub-net
+
+  # ==========================================
+  # 3. Data Utility Runner (Generator & Ingestion)
+  # ==========================================
+  data-runner:
+    build:
+      context: .
+      dockerfile: data/Dockerfile
+    container_name: nomadhub-data-runner
+    volumes:
+      - ./data:/app/data
+      - ./aws:/app/aws
+    profiles: ["tools"]
+    networks:
+      - nomadhub-net
+
+volumes:
+  airflow-postgres-data:
+
+networks:
+  nomadhub-net:
+    driver: bridge
