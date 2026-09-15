@@ -67,22 +67,135 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Snowflake connection ──────────────────────────────────────────────────────
+# ── Data Connection (Snowflake with DuckDB Local Fallback) ────────────────────
+DATA_DIR = Path(__file__).parent.parent / "data"
+
+@st.cache_resource
+def get_duckdb_conn():
+    import duckdb
+    conn = duckdb.connect(database=":memory:")
+    # Register local CSVs if they exist
+    csv_files = {
+        "countries": DATA_DIR / "countries.csv",
+        "airports": DATA_DIR / "airports.csv",
+        "hotels": DATA_DIR / "hotels.csv",
+        "users": DATA_DIR / "users.csv",
+        "flights": DATA_DIR / "flights.csv",
+        "hotel_bookings": DATA_DIR / "hotel_bookings.csv",
+        "reviews": DATA_DIR / "reviews.csv",
+    }
+    for table, path in csv_files.items():
+        if path.exists():
+            conn.execute(f"CREATE VIEW IF NOT EXISTS {table} AS SELECT * FROM read_csv_auto('{path.as_posix()}')")
+    return conn
+
 @st.cache_resource
 def get_conn():
-    return snowflake.connector.connect(
-        account   = os.environ["SNOWFLAKE_ACCOUNT"],
-        user      = os.environ.get("SNOWFLAKE_USER", "ANALYST_USER"),
-        password  = os.environ["SNOWFLAKE_PASSWORD"],
-        database  = "NOMAD_HUB",
-        warehouse = "NOMAD_WH",
-        role      = "ANALYST_ROLE",
-    )
+    if not os.environ.get("SNOWFLAKE_ACCOUNT") or os.environ.get("SNOWFLAKE_ACCOUNT") == "xy12345.eu-central-1":
+        return None
+    try:
+        return snowflake.connector.connect(
+            account   = os.environ["SNOWFLAKE_ACCOUNT"],
+            user      = os.environ.get("SNOWFLAKE_USER", "ANALYST_USER"),
+            password  = os.environ.get("SNOWFLAKE_PASSWORD", ""),
+            database  = "NOMAD_HUB",
+            warehouse = "NOMAD_WH",
+            role      = os.environ.get("SNOWFLAKE_ROLE", "ANALYST_ROLE"),
+        )
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def query(sql: str) -> pd.DataFrame:
-    return pd.read_sql(sql, get_conn())
+    sf_conn = get_conn()
+    if sf_conn is not None:
+        try:
+            df = pd.read_sql(sql, sf_conn)
+            df.columns = [c.upper() for c in df.columns]
+            return df
+        except Exception:
+            pass
+
+    # Local Fallback via DuckDB + Generated CSVs
+    try:
+        duck_conn = get_duckdb_conn()
+        # Adapt common Snowflake schema prefixes for local queries
+        cleaned_sql = sql
+        cleaned_sql = re.sub(r"NOMAD_HUB\.(RAW|STAGING|MARTS|AI)\.", "", cleaned_sql, flags=re.IGNORECASE)
+        cleaned_sql = re.sub(r"DATEADD\('([^']+)',\s*(-?\d+),\s*([^\)]+)\)", r"\3 + INTERVAL \2 \1", cleaned_sql, flags=re.IGNORECASE)
+        cleaned_sql = re.sub(r"CURRENT_DATE\(\)", "CURRENT_DATE", cleaned_sql, flags=re.IGNORECASE)
+        cleaned_sql = re.sub(r"NULLS LAST", "", cleaned_sql, flags=re.IGNORECASE)
+
+        # Basic mock queries if mart tables are asked locally
+        if "MART_REVENUE_SUMMARY" in sql.upper() or "FCT_" in sql.upper():
+            # If marts don't exist yet as views, create quick mock/proxy aggregations
+            if Path(DATA_DIR / "flights.csv").exists() and Path(DATA_DIR / "hotel_bookings.csv").exists():
+                duck_conn.execute("""
+                    CREATE VIEW IF NOT EXISTS MART_REVENUE_SUMMARY AS
+                    SELECT 
+                        booking_date AS date_id,
+                        'flight' AS revenue_type,
+                        COUNT(*) AS total_bookings,
+                        SUM(fare_amount_usd) AS recognised_revenue_usd,
+                        AVG(CASE WHEN is_cancelled THEN 100.0 ELSE 0.0 END) AS cancellation_rate_pct
+                    FROM flights GROUP BY 1
+                    UNION ALL
+                    SELECT 
+                        booking_date AS date_id,
+                        'hotel' AS revenue_type,
+                        COUNT(*) AS total_bookings,
+                        SUM(total_amount_usd) AS recognised_revenue_usd,
+                        AVG(CASE WHEN is_cancelled THEN 100.0 ELSE 0.0 END) AS cancellation_rate_pct
+                    FROM hotel_bookings GROUP BY 1;
+                """)
+                duck_conn.execute("""
+                    CREATE VIEW IF NOT EXISTS DIM_DATE AS
+                    SELECT DISTINCT booking_date AS date_id, strftime(booking_date, '%Y-%m-01') AS month_start_date FROM flights;
+                """)
+                duck_conn.execute("""
+                    CREATE VIEW IF NOT EXISTS MART_DESTINATION_PERFORMANCE AS
+                    SELECT 
+                        arrival_airport_code AS destination_city,
+                        'Global' AS destination_country,
+                        SUM(fare_amount_usd) AS total_revenue_usd,
+                        ROW_NUMBER() OVER (ORDER BY SUM(fare_amount_usd) DESC) AS revenue_rank
+                    FROM flights GROUP BY 1;
+                """)
+                duck_conn.execute("""
+                    CREATE VIEW IF NOT EXISTS FCT_FLIGHTS AS
+                    SELECT 
+                        flight_id, booking_date AS booking_date_id, cabin_class, fare_amount_usd AS total_fare_usd,
+                        datediff('day', booking_date, flight_date) AS booking_lead_days, is_cancelled
+                    FROM flights;
+                """)
+                duck_conn.execute("""
+                    CREATE VIEW IF NOT EXISTS FCT_HOTEL_BOOKINGS AS
+                    SELECT 
+                        booking_id, booking_date AS booking_date_id, total_amount_usd AS booking_total_usd,
+                        datediff('day', check_in_date, check_out_date) AS length_of_stay_nights, is_cancelled, room_type
+                    FROM hotel_bookings;
+                """)
+                duck_conn.execute("""
+                    CREATE VIEW IF NOT EXISTS MART_REVIEW_INSIGHTS AS
+                    SELECT 
+                        review_id, review_type, rating,
+                        CASE WHEN rating >= 4 THEN 'positive' WHEN rating = 3 THEN 'neutral' ELSE 'negative' END AS ai_sentiment,
+                        CASE WHEN rating >= 4 THEN 0.85 WHEN rating = 3 THEN 0.50 ELSE 0.15 END AS ai_sentiment_score,
+                        'Hospitality & Travel' AS ai_category,
+                        'Digital Nomad' AS ai_travel_type,
+                        review_text AS ai_summary,
+                        EXTRACT(year FROM review_date) AS review_year,
+                        EXTRACT(month FROM review_date) AS review_month
+                    FROM reviews;
+                """)
+
+        df = duck_conn.execute(cleaned_sql).df()
+        df.columns = [c.upper() for c in df.columns]
+        return df
+    except Exception as e:
+        st.warning(f"Local query note: {e}")
+        return pd.DataFrame()
 
 
 # ── Sidebar navigation ────────────────────────────────────────────────────────

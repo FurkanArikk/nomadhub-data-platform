@@ -29,7 +29,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from faker import Faker
-from tqdm import tqdm
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
 
 # ── Reproducibility ────────────────────────────────────────────────────────────
 SEED = 42
@@ -434,7 +439,7 @@ def generate_flights(n: int, n_airports: int, n_users: int) -> None:
                     "origin_iata": origin,
                     "destination_iata": dest,
                     "airline": random.choice(AIRLINE_NAMES),
-                    "flight_number": f"{random.choice(['NH','SK','BL','SW','TJ']}{random.randint(100,9999)}",
+                    "flight_number": f"{random.choice(['NH','SK','BL','SW','TJ'])}{random.randint(100,9999)}",
                     "cabin_class": cabin,
                     "outbound_date": str(outbound),
                     "return_date": str(return_date) if return_date else "",
