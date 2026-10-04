@@ -38,6 +38,8 @@ airflow/plugins/
 airflow/dags/__pycache__/
 
 # Data files — too large for git
+data/raw/
+data/.cache/
 data/*.csv
 data/*.parquet
 data/*.json.gz
@@ -84,10 +86,16 @@ dmypy.json
 # Docker
 .docker/
 
-# Terraform (if used for AWS)
+# Terraform
 *.tfstate
-*.tfstate.backup
+*.tfstate.*
 .terraform/
+terraform/terraform.tfvars
+# keep the provider lock file (.terraform.lock.hcl) committed
+
+# Snowflake private keys (normally in ~/.nomadhub/keys, never in the repo)
+*.p8
+*_rsa_key.pub
 
 # GitHub Actions artifacts
 .github/artifacts/

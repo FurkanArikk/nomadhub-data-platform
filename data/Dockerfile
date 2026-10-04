@@ -15,6 +15,8 @@ RUN pip install --no-cache-dir \
     numpy==1.26.4 \
     tqdm==4.66.5 \
     boto3==1.35.0 \
+    requests==2.32.3 \
+    duckdb==1.5.6 \
     python-dotenv==1.0.1
 
 ENTRYPOINT ["python"]
