@@ -1,0 +1,19 @@
+airline_code,airline_name,carrier_type,parent_airline_code
+WN,Southwest Airlines,low_cost,
+DL,Delta Air Lines,mainline,
+AA,American Airlines,mainline,
+UA,United Airlines,mainline,
+AS,Alaska Airlines,mainline,
+B6,JetBlue Airways,low_cost,
+NK,Spirit Airlines,ultra_low_cost,
+F9,Frontier Airlines,ultra_low_cost,
+G4,Allegiant Air,ultra_low_cost,
+HA,Hawaiian Airlines,mainline,
+OO,SkyWest Airlines,regional,
+YX,Republic Airways,regional,
+MQ,Envoy Air,regional,AA
+OH,PSA Airlines,regional,AA
+9E,Endeavor Air,regional,DL
+YV,Mesa Airlines,regional,
+QX,Horizon Air,regional,AS
+EV,ExpressJet Airlines,regional,

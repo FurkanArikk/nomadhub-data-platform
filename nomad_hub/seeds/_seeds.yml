@@ -1,0 +1,29 @@
+version: 2
+
+seeds:
+  - name: cities
+    description: "The 20 Inside Airbnb cities: country, local currency, US flag."
+    columns:
+      - name: city
+        data_tests: [unique, not_null]
+  - name: city_airports
+    description: "Airports serving each city's metro. Hawaii is split by island (metro_key)."
+    columns:
+      - name: iata_code
+        data_tests: [unique, not_null]
+  - name: airport_code_aliases
+    description: "Historical IATA codes used by BTS that OurAirports no longer carries (renamed/closed airports)."
+    columns:
+      - name: iata_code
+        data_tests: [unique, not_null]
+  - name: airlines
+    description: "BTS reporting carriers. Regional carriers list the mainline they fly for."
+    columns:
+      - name: airline_code
+        data_tests: [unique, not_null]
+  - name: fx_rates_daily
+    description: "USD per unit of currency, daily, forward-filled (Source: ECB). Built by data/download_sources.py fx."
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [rate_date, currency_code]
