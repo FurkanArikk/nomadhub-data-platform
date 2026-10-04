@@ -101,6 +101,14 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  airflow-triggerer:                # runs deferrable tasks; Airflow 3's health check expects it
+    <<: *airflow-common
+    command: triggerer
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
   airflow-dag-processor:            # Airflow 3: DAG parsing runs as its own component
     <<: *airflow-common
     command: dag-processor

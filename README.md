@@ -35,6 +35,20 @@ All numbers come from the marts, and anyone with the repo can rebuild them.
 
 ---
 
+## Screenshots
+
+| | |
+|---|---|
+| **Overview:** 45.8M flights, the May 2020 low, stays per month<br>![Overview](docs/screenshots/01_overview.png) | **Airline reliability:** on-time ranking, delay causes, monthly trends<br>![Airline reliability](docs/screenshots/02_airline_reliability.png) |
+| **City revenue:** GBV and daily rate in USD, seasonality<br>![City revenue](docs/screenshots/03_city_revenue.png) | **Forward occupancy:** 20 cities × 12 months from the 188M-row calendar<br>![Forward occupancy](docs/screenshots/04_forward_occupancy.png) |
+| **Review insights:** what Gemini found in multilingual reviews<br>![Review insights](docs/screenshots/05_review_insights.png) | **Chat with reviews:** RAG over Snowflake `VECTOR`, cited answers<br>![Chat with reviews](docs/screenshots/06_chat_with_reviews.png) |
+| **Ask the warehouse:** Gemini text-to-SQL, read-only role<br>![Ask the warehouse](docs/screenshots/07_ask_the_warehouse.png) | **Airflow 3:** the daily `nomad_hub_daily` DAG<br>![Airflow DAG](docs/screenshots/08_airflow_dag.png) |
+
+Retake them from the running stack with [`scripts/take_screenshots.py`](scripts/take_screenshots.py)
+(headless Chromium in a container).
+
+---
+
 ## Data — what's real and what's generated
 
 | Table | Rows | Source | Real? |
