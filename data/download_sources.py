@@ -26,9 +26,10 @@ Usage:
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+from tqdm import tqdm
+
 from sources import airbnb, bts, ecb, ourairports
 from sources.common import MANIFEST_PATH, update_manifest
-from tqdm import tqdm
 
 SAMPLE_MONTHS = ("2025-01", "2025-01")
 SAMPLE_CITIES = ["boston", "munich"]

@@ -1,319 +1,191 @@
 """
-NomadHub — AI Review Enrichment (Google Gemini)
-================================================
-Reads unenriched reviews from Snowflake STAGING.STG_REVIEWS,
-calls Gemini 1.5 Flash in batch to extract structured insights,
-and upserts results to NOMAD_HUB.AI.REVIEW_ENRICHED.
+LLM enrichment: turn free-text reviews into queryable columns
+=============================================================
+Reads completed stays that have a real review, sends the review text to Gemini in
+batches (one request = 25 reviews, typed JSON schema), and MERGEs the results into
+NOMAD_HUB.AI.REVIEW_ENRICHMENTS. dbt then models that table into the AI marts.
 
-AI-extracted fields per review:
-  - sentiment          : positive / neutral / negative
-  - sentiment_score    : float 0.0–1.0
-  - category           : flight_service / hotel_comfort / location / staff / value / food / cleanliness
-  - travel_type        : business / leisure / family / solo / honeymoon
-  - summary            : 1-2 sentence summary
-  - key_topics         : JSON array of up to 5 key topics
-  - service_score      : 1–5
-  - value_score        : 1–5
-  - location_score     : 1–5
-  - cleanliness_score  : 1–5
-  - staff_score        : 1–5
+  python ai/enrich_reviews.py --limit 500            # enrich 500 new reviews
+  python ai/enrich_reviews.py --limit 50 --dry-run   # print results, write nothing
 
-Usage:
-    python enrich_reviews.py                     # enrich all unenriched
-    python enrich_reviews.py --limit 1000        # process N reviews
-    python enrich_reviews.py --batch-size 50     # custom batch size
-    python enrich_reviews.py --dry-run           # test without writing to Snowflake
+Design choices
+- Idempotent: only reviews not yet in REVIEW_ENRICHMENTS are selected, and a failed
+  batch is NOT written — it is simply picked up again next run (no fake "neutral" rows).
+- Deterministic sample: ordered by a hash of review_id, so runs are reproducible.
+  Half of each run comes from US stays where the guest flew in on a real BTS flight,
+  which powers mart_delay_impact (does a delayed arrival show up in the review?).
+- Rate limited for the free tier (--rpm), with exponential backoff on 429/5xx.
 """
 
 import argparse
 import json
-import logging
-import os
 import time
-from datetime import datetime, timezone
-from typing import Any
+from typing import Literal
 
-import google.generativeai as genai
-import pandas as pd
-import snowflake.connector
-from dotenv import load_dotenv
-from tqdm import tqdm
+from google.genai import errors, types
+from pydantic import BaseModel, Field
 
-load_dotenv()
+from common import GEMINI_ENRICH_MODEL, gemini, writer_connection
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger(__name__)
+TOPICS = [
+    "cleanliness", "location", "host_communication", "check_in", "value", "comfort",
+    "noise", "amenities", "accuracy", "safety", "transport", "neighbourhood", "other",
+]
 
 
-# ── Gemini setup ──────────────────────────────────────────────────────────────
+class ReviewEnrichment(BaseModel):
+    review_id: int
+    language: str = Field(description="ISO 639-1 code of the review text, e.g. en, fr, ja")
+    sentiment: Literal["positive", "neutral", "negative", "mixed"]
+    sentiment_score: float = Field(description="-1.0 (very negative) to 1.0 (very positive)")
+    topics: list[str] = Field(description=f"1-3 topics the guest talks about, from: {', '.join(TOPICS)}")
+    complaint: str | None = Field(description="Main complaint in max 8 English words, or null if none")
+    mentions_travel_disruption: bool = Field(
+        description="True if the guest mentions a delayed/cancelled flight, late arrival or travel trouble")
+    summary_en: str = Field(description="One-sentence English summary, max 25 words")
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-MODEL = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    generation_config=genai.GenerationConfig(
-        temperature=0.1,          # low temp for structured extraction
-        response_mime_type="application/json",
-    ),
-)
 
-ENRICHMENT_PROMPT = """
-You are a travel review analyst. Given a travel review, extract structured insights.
-Return ONLY valid JSON (no markdown, no extra text).
+SYSTEM_PROMPT = f"""You analyse guest reviews of short-term rentals for a travel platform.
+Reviews can be in any language. For EVERY review you receive, return one object with the
+same review_id. Use only these topics: {", ".join(TOPICS)}.
+sentiment_score: -1.0 very negative, 0 neutral, 1.0 very positive; "mixed" = clear praise
+AND clear criticism. Write complaint and summary_en in English, whatever the review language."""
 
-Review:
-Title: {title}
-Type: {review_type}
-Rating: {rating}/5
-Text: {text}
+DDL = """
+CREATE TABLE IF NOT EXISTS NOMAD_HUB.AI.REVIEW_ENRICHMENTS (
+    REVIEW_ID                   NUMBER PRIMARY KEY,
+    LANGUAGE                    VARCHAR(8),
+    SENTIMENT                   VARCHAR(10),
+    SENTIMENT_SCORE             FLOAT,
+    TOPICS                      ARRAY,
+    COMPLAINT                   VARCHAR,
+    MENTIONS_TRAVEL_DISRUPTION  BOOLEAN,
+    SUMMARY_EN                  VARCHAR,
+    MODEL                       VARCHAR,
+    ENRICHED_AT                 TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
+) COMMENT = 'Gemini review enrichment, written by ai/enrich_reviews.py'
+"""
 
-Return this exact JSON structure:
-{{
-  "sentiment": "positive" | "neutral" | "negative",
-  "sentiment_score": <float 0.0-1.0, where 1.0=most positive>,
-  "category": "flight_service" | "hotel_comfort" | "location" | "staff" | "value" | "food" | "cleanliness",
-  "travel_type": "business" | "leisure" | "family" | "solo" | "honeymoon" | "unknown",
-  "summary": "<1-2 sentence neutral summary of the review>",
-  "key_topics": ["<topic1>", "<topic2>", ...(max 5)],
-  "service_score": <int 1-5 or null if not applicable>,
-  "value_score": <int 1-5>,
-  "location_score": <int 1-5 or null if not applicable>,
-  "cleanliness_score": <int 1-5 or null if review_type is 'flight'>,
-  "staff_score": <int 1-5>
-}}
+# Unenriched reviews of completed stays; with_flight = guest flew in on a booked BTS flight.
+CANDIDATES_SQL = """
+SELECT r.review_id, r.comment_text
+FROM NOMAD_HUB.MARTS.FCT_STAY_BOOKINGS s
+JOIN NOMAD_HUB.STAGING.STG_AIRBNB__REVIEWS r ON r.review_id = s.review_id
+WHERE NOT s.is_cancelled
+  AND r.comment_length BETWEEN 30 AND 2000
+  AND {flight_filter} EXISTS (
+        SELECT 1 FROM NOMAD_HUB.MARTS.FCT_FLIGHT_BOOKINGS f
+        WHERE f.stay_booking_id = s.stay_booking_id AND f.leg = 'outbound')
+  AND NOT EXISTS (SELECT 1 FROM NOMAD_HUB.AI.REVIEW_ENRICHMENTS e WHERE e.review_id = r.review_id)
+ORDER BY HASH(r.review_id)
+LIMIT %(limit)s
+"""
+
+MERGE_SQL = """
+MERGE INTO NOMAD_HUB.AI.REVIEW_ENRICHMENTS t
+USING (
+    SELECT review_id, language, sentiment, sentiment_score, PARSE_JSON(topics)::ARRAY AS topics,
+           complaint, mentions_travel_disruption, summary_en, model
+    FROM review_enrichments_batch
+) s ON t.review_id = s.review_id
+WHEN NOT MATCHED THEN INSERT
+    (review_id, language, sentiment, sentiment_score, topics, complaint,
+     mentions_travel_disruption, summary_en, model)
+VALUES (s.review_id, s.language, s.sentiment, s.sentiment_score, s.topics, s.complaint,
+        s.mentions_travel_disruption, s.summary_en, s.model)
 """
 
 
-# ── Snowflake setup ───────────────────────────────────────────────────────────
-
-def get_snowflake_conn():
-    return snowflake.connector.connect(
-        account   = os.environ["SNOWFLAKE_ACCOUNT"],
-        user      = os.environ["SNOWFLAKE_USER"],
-        password  = os.environ["SNOWFLAKE_PASSWORD"],
-        database  = "NOMAD_HUB",
-        schema    = "AI",
-        warehouse = "NOMAD_WH",
-        role      = "DBT_ROLE",
-    )
+def fetch_candidates(cursor, limit: int) -> list[tuple[int, str]]:
+    with_flight = limit // 2
+    rows = cursor.execute(CANDIDATES_SQL.format(flight_filter=""), {"limit": with_flight}).fetchall()
+    rows += cursor.execute(CANDIDATES_SQL.format(flight_filter="NOT"), {"limit": limit - len(rows)}).fetchall()
+    return [(int(rid), text) for rid, text in rows]
 
 
-def ensure_target_table(conn) -> None:
-    """Create AI.REVIEW_ENRICHED if it doesn't exist."""
-    ddl = """
-    CREATE TABLE IF NOT EXISTS NOMAD_HUB.AI.REVIEW_ENRICHED (
-        REVIEW_ID           NUMBER          PRIMARY KEY,
-        AI_SENTIMENT        VARCHAR(10),
-        AI_SENTIMENT_SCORE  FLOAT,
-        AI_CATEGORY         VARCHAR(30),
-        AI_TRAVEL_TYPE      VARCHAR(20),
-        AI_SUMMARY          VARCHAR(1000),
-        AI_KEY_TOPICS       VARIANT,
-        AI_SERVICE_SCORE    NUMBER(1),
-        AI_VALUE_SCORE      NUMBER(1),
-        AI_LOCATION_SCORE   NUMBER(1),
-        AI_CLEANLINESS_SCORE NUMBER(1),
-        AI_STAFF_SCORE      NUMBER(1),
-        ENRICHED_AT         TIMESTAMP_NTZ
-    ) COMMENT = 'Gemini-enriched travel review insights'
-    """
-    conn.cursor().execute(ddl)
-    log.info("✅ AI.REVIEW_ENRICHED table ready")
-
-
-def fetch_unenriched_reviews(conn, limit: int | None) -> pd.DataFrame:
-    """Fetch reviews that haven't been enriched yet."""
-    limit_clause = f"LIMIT {limit}" if limit else ""
-    query = f"""
-    SELECT
-        r.REVIEW_ID,
-        r.REVIEW_TYPE,
-        r.REVIEW_TITLE,
-        r.REVIEW_TEXT,
-        r.RATING
-    FROM NOMAD_HUB.STAGING.STG_REVIEWS r
-    LEFT JOIN NOMAD_HUB.AI.REVIEW_ENRICHED e
-        ON r.REVIEW_ID = e.REVIEW_ID
-    WHERE e.REVIEW_ID IS NULL
-      AND r.REVIEW_TEXT IS NOT NULL
-      AND LENGTH(r.REVIEW_TEXT) >= 20
-    ORDER BY r.REVIEW_ID
-    {limit_clause}
-    """
-    return pd.read_sql(query, conn)
-
-
-def enrich_batch(batch: list[dict]) -> list[dict]:
-    """Call Gemini to enrich a batch of reviews."""
-    results = []
-    for review in batch:
-        prompt = ENRICHMENT_PROMPT.format(
-            title       = review.get("REVIEW_TITLE", ""),
-            review_type = review.get("REVIEW_TYPE", "unknown"),
-            rating      = review.get("RATING", 3),
-            text        = review["REVIEW_TEXT"][:2000],  # truncate very long texts
-        )
+def classify_batch(batch: list[tuple[int, str]], max_retries: int = 5) -> list[ReviewEnrichment]:
+    payload = "\n\n".join(f"review_id: {rid}\ntext: {text}" for rid, text in batch)
+    for attempt in range(max_retries):
         try:
-            response = MODEL.generate_content(prompt)
-            parsed = json.loads(response.text)
-            parsed["review_id"] = review["REVIEW_ID"]
-            parsed["error"] = None
-        except json.JSONDecodeError as e:
-            log.warning(f"JSON parse error for review {review['REVIEW_ID']}: {e}")
-            parsed = _fallback_result(review["REVIEW_ID"])
-        except Exception as e:
-            log.warning(f"Gemini error for review {review['REVIEW_ID']}: {e}")
-            parsed = _fallback_result(review["REVIEW_ID"])
-
-        results.append(parsed)
-
-        # Rate limiting: ~30 req/min on free tier → ~2s between calls
-        time.sleep(0.5)
-
-    return results
-
-
-def _fallback_result(review_id: int) -> dict:
-    """Default result when Gemini call fails."""
-    return {
-        "review_id": review_id,
-        "sentiment": "neutral",
-        "sentiment_score": 0.5,
-        "category": "unknown",
-        "travel_type": "unknown",
-        "summary": "Unable to process review.",
-        "key_topics": [],
-        "service_score": None,
-        "value_score": None,
-        "location_score": None,
-        "cleanliness_score": None,
-        "staff_score": None,
-        "error": "gemini_error",
-    }
+            response = gemini().models.generate_content(
+                model=GEMINI_ENRICH_MODEL,
+                contents=payload,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0,
+                    response_mime_type="application/json",
+                    response_schema=list[ReviewEnrichment],
+                ),
+            )
+            results = response.parsed or []
+            wanted = {rid for rid, _ in batch}
+            clean = []
+            for r in results:
+                if r.review_id not in wanted:
+                    continue                          # never trust ids we didn't send
+                r.topics = [t for t in r.topics if t in TOPICS][:3] or ["other"]
+                r.sentiment_score = max(-1.0, min(1.0, r.sentiment_score))
+                clean.append(r)
+            return clean
+        except errors.APIError as exc:
+            retryable = exc.code in (429, 500, 502, 503, 504)
+            if not retryable or attempt == max_retries - 1:
+                raise
+            wait = 2 ** attempt * 10
+            print(f"  ⚠ Gemini {exc.code}; retry in {wait}s")
+            time.sleep(wait)
+    return []
 
 
-def upsert_results(conn, results: list[dict], dry_run: bool = False) -> int:
-    """Upsert enriched results into AI.REVIEW_ENRICHED."""
-    if dry_run:
-        log.info(f"[DRY RUN] Would upsert {len(results)} rows")
-        return len(results)
-
-    enriched_at = datetime.now(timezone.utc)
-    rows = []
-    for r in results:
-        rows.append((
-            r["review_id"],
-            r.get("sentiment"),
-            r.get("sentiment_score"),
-            r.get("category"),
-            r.get("travel_type"),
-            r.get("summary"),
-            json.dumps(r.get("key_topics", [])),
-            r.get("service_score"),
-            r.get("value_score"),
-            r.get("location_score"),
-            r.get("cleanliness_score"),
-            r.get("staff_score"),
-            enriched_at,
-        ))
-
-    merge_sql = """
-    MERGE INTO NOMAD_HUB.AI.REVIEW_ENRICHED AS target
-    USING (
-        SELECT
-            column1::NUMBER          AS review_id,
-            column2::VARCHAR(10)     AS ai_sentiment,
-            column3::FLOAT           AS ai_sentiment_score,
-            column4::VARCHAR(30)     AS ai_category,
-            column5::VARCHAR(20)     AS ai_travel_type,
-            column6::VARCHAR(1000)   AS ai_summary,
-            PARSE_JSON(column7)      AS ai_key_topics,
-            column8::NUMBER(1)       AS ai_service_score,
-            column9::NUMBER(1)       AS ai_value_score,
-            column10::NUMBER(1)      AS ai_location_score,
-            column11::NUMBER(1)      AS ai_cleanliness_score,
-            column12::NUMBER(1)      AS ai_staff_score,
-            column13::TIMESTAMP_NTZ  AS enriched_at
-        FROM VALUES {placeholders}
-    ) AS source ON target.review_id = source.review_id
-    WHEN MATCHED THEN UPDATE SET
-        ai_sentiment        = source.ai_sentiment,
-        ai_sentiment_score  = source.ai_sentiment_score,
-        ai_category         = source.ai_category,
-        ai_travel_type      = source.ai_travel_type,
-        ai_summary          = source.ai_summary,
-        ai_key_topics       = source.ai_key_topics,
-        ai_service_score    = source.ai_service_score,
-        ai_value_score      = source.ai_value_score,
-        ai_location_score   = source.ai_location_score,
-        ai_cleanliness_score= source.ai_cleanliness_score,
-        ai_staff_score      = source.ai_staff_score,
-        enriched_at         = source.enriched_at
-    WHEN NOT MATCHED THEN INSERT (
-        review_id, ai_sentiment, ai_sentiment_score, ai_category, ai_travel_type,
-        ai_summary, ai_key_topics, ai_service_score, ai_value_score, ai_location_score,
-        ai_cleanliness_score, ai_staff_score, enriched_at
-    ) VALUES (
-        source.review_id, source.ai_sentiment, source.ai_sentiment_score, source.ai_category,
-        source.ai_travel_type, source.ai_summary, source.ai_key_topics, source.ai_service_score,
-        source.ai_value_score, source.ai_location_score, source.ai_cleanliness_score,
-        source.ai_staff_score, source.enriched_at
+def save(conn, results: list[ReviewEnrichment]) -> int:
+    cur = conn.cursor()
+    cur.execute("""CREATE TEMPORARY TABLE IF NOT EXISTS review_enrichments_batch (
+        review_id NUMBER, language VARCHAR, sentiment VARCHAR, sentiment_score FLOAT, topics VARCHAR,
+        complaint VARCHAR, mentions_travel_disruption BOOLEAN, summary_en VARCHAR, model VARCHAR)""")
+    cur.execute("TRUNCATE TABLE review_enrichments_batch")
+    cur.executemany(
+        "INSERT INTO review_enrichments_batch VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        [(r.review_id, r.language[:8], r.sentiment, r.sentiment_score, json.dumps(r.topics),
+          r.complaint, r.mentions_travel_disruption, r.summary_en, GEMINI_ENRICH_MODEL) for r in results],
     )
-    """
+    return cur.execute(MERGE_SQL).fetchone()[0]
 
-    # Snowflake VALUES placeholder
-    placeholders = ", ".join(["(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"] * len(rows))
-    flat_values = [v for row in rows for v in row]
-
-    cursor = conn.cursor()
-    cursor.execute(merge_sql.format(placeholders=placeholders), flat_values)
-    return cursor.rowcount
-
-
-# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="NomadHub review enrichment via Gemini")
-    parser.add_argument("--limit", type=int, help="Max reviews to enrich in this run")
-    parser.add_argument("--batch-size", type=int, default=20, help="Gemini batch size (default: 20)")
-    parser.add_argument("--dry-run", action="store_true", help="Run without writing to Snowflake")
+    parser = argparse.ArgumentParser(description="Enrich reviews with Gemini")
+    parser.add_argument("--limit", type=int, default=500, help="reviews to enrich this run")
+    parser.add_argument("--batch-size", type=int, default=25, help="reviews per Gemini request")
+    parser.add_argument("--rpm", type=float, default=8, help="max Gemini requests per minute")
+    parser.add_argument("--dry-run", action="store_true", help="print, don't write")
     args = parser.parse_args()
 
-    log.info("=" * 60)
-    log.info("  NomadHub Review Enrichment — Google Gemini 1.5 Flash")
-    log.info("=" * 60)
+    conn = writer_connection()
+    cur = conn.cursor()
+    cur.execute(DDL)
+    reviews = fetch_candidates(cur, args.limit)
+    print(f"Model {GEMINI_ENRICH_MODEL}: {len(reviews)} reviews to enrich in batches of {args.batch_size}")
 
-    conn = get_snowflake_conn()
+    written, failed, last_call = 0, 0, 0.0
+    for start in range(0, len(reviews), args.batch_size):
+        batch = reviews[start:start + args.batch_size]
+        time.sleep(max(0.0, 60 / args.rpm - (time.time() - last_call)))
+        last_call = time.time()
+        try:
+            results = classify_batch(batch)
+        except errors.APIError as exc:
+            failed += len(batch)
+            print(f"  ❌ batch {start // args.batch_size + 1}: {exc.code} {exc.message} — will retry next run")
+            continue
+        if args.dry_run:
+            for r in results[:3]:
+                print("   ", r.model_dump())
+        else:
+            written += save(conn, results)
+        failed += len(batch) - len(results)
+        print(f"  ✓ batch {start // args.batch_size + 1}: {len(results)}/{len(batch)} enriched")
 
-    if not args.dry_run:
-        ensure_target_table(conn)
-
-    # Fetch unenriched reviews
-    log.info(f"Fetching unenriched reviews (limit={args.limit or 'all'})...")
-    df = fetch_unenriched_reviews(conn, args.limit)
-    log.info(f"  → Found {len(df):,} reviews to enrich")
-
-    if len(df) == 0:
-        log.info("✅ No new reviews to enrich. All up-to-date.")
-        return
-
-    # Process in batches
-    records = df.to_dict("records")
-    total_upserted = 0
-
-    batches = [records[i:i + args.batch_size] for i in range(0, len(records), args.batch_size)]
-    for batch in tqdm(batches, desc="Enriching batches", unit="batch"):
-        enriched = enrich_batch(batch)
-        n = upsert_results(conn, enriched, dry_run=args.dry_run)
-        total_upserted += len(enriched)
-
-    log.info(f"\n✅ Enrichment complete: {total_upserted:,} reviews processed")
-    log.info("   Run dbt to materialise mart_review_insights:")
-    log.info("   dbt run --select mart_review_insights")
     conn.close()
+    print(f"Done: {written} written, {failed} not enriched (retried next run)")
 
 
 if __name__ == "__main__":

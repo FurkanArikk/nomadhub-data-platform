@@ -32,6 +32,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 from faker import Faker
+
 from sources.common import rel, update_manifest
 
 DATA_DIR = Path(__file__).resolve().parent

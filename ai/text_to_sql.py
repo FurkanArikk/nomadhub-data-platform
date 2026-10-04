@@ -1,251 +1,123 @@
 """
-NomadHub — Text-to-SQL: "Query Your Warehouse in Plain English"
-================================================================
-Fetches MARTS schema metadata from Snowflake,
-sends NL questions to Gemini 1.5 Flash for SQL generation,
-executes the SQL (SELECT-only, using DBT_ROLE),
-and displays results.
+Text-to-SQL — "ask the warehouse in plain English"
+==================================================
+1. Reads the live schema of the MARTS and AI tables (names, types, comments) from
+   INFORMATION_SCHEMA, so the prompt never drifts from what dbt actually built.
+2. Gemini writes ONE Snowflake SELECT for the question.
+3. A guard rejects anything that isn't a single read-only query.
+4. The query runs as STREAMLIT_SVC / ANALYST_ROLE, which can only SELECT — the guard is a
+   courtesy; the role is the real security boundary. At most 500 rows are fetched.
 
-Security:
-  - Only SELECT statements are allowed (ANALYST_ROLE = read-only)
-  - SQL is validated before execution
-  - Schema context is injected as Gemini system prompt
+  python ai/text_to_sql.py "Which airline had the worst on-time rate in 2025?"
 
-Run: streamlit run text_to_sql.py
+The Streamlit app imports generate_sql(), is_safe() and run().
 """
 
-import os
+import argparse
 import re
 
 import pandas as pd
-import snowflake.connector
-import streamlit as st
-from dotenv import load_dotenv
-import google.generativeai as genai
+from google.genai import types
+from pydantic import BaseModel
 
-load_dotenv()
+from common import GEMINI_MODEL, gemini, reader_connection
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-CHAT_MODEL = genai.GenerativeModel("gemini-1.5-flash")
+MAX_ROWS = 500
+FORBIDDEN = re.compile(
+    r"\b(insert|update|delete|merge|drop|create|alter|truncate|grant|revoke|copy|put|get|"
+    r"call|execute|undrop|use|set|unset|commit|rollback|begin|remove|list)\b",
+    re.IGNORECASE,
+)
 
-MAX_ROWS = 500  # Safety limit for query results
+SCHEMA_SQL = """
+SELECT table_schema, table_name, column_name, data_type, comment
+FROM NOMAD_HUB.INFORMATION_SCHEMA.COLUMNS
+WHERE table_schema IN ('MARTS', 'AI')
+  AND table_name NOT LIKE '%%EMBEDDINGS%%'
+ORDER BY table_schema, table_name, ordinal_position
+"""
+
+GUIDE = """
+Business notes:
+- mart_* tables are pre-aggregated; prefer them over the fct_* tables when they fit.
+- Money is USD in *_usd columns. platform_revenue_usd = NomadHub's service fees.
+- on_time_rate excludes cancelled/diverted flights (DOT definition).
+- Flights are US domestic only (BTS). Stays cover 20 cities (10 US, 10 international).
+- City values are lowercase keys like 'new_york', 'paris', 'tokyo'.
+"""
 
 
-# ── Snowflake ─────────────────────────────────────────────────────────────────
-@st.cache_resource
-def get_conn():
-    return snowflake.connector.connect(
-        account   = os.environ["SNOWFLAKE_ACCOUNT"],
-        user      = os.environ["SNOWFLAKE_USER"],
-        password  = os.environ["SNOWFLAKE_PASSWORD"],
-        database  = "NOMAD_HUB",
-        schema    = "MARTS",
-        warehouse = "NOMAD_WH",
-        role      = "ANALYST_ROLE",  # Read-only role
+class SqlAnswer(BaseModel):
+    sql: str
+    explanation: str
+
+
+def schema_description(conn) -> str:
+    lines, current = [], None
+    for schema, table, column, dtype, comment in conn.cursor().execute(SCHEMA_SQL).fetchall():
+        if (schema, table) != current:
+            current = (schema, table)
+            lines.append(f"\n{schema}.{table}:")
+        lines.append(f"  {column} {dtype}" + (f" -- {comment}" if comment else ""))
+    return "\n".join(lines)
+
+
+def generate_sql(question: str, schema: str) -> SqlAnswer:
+    response = gemini().models.generate_content(
+        model=GEMINI_MODEL,
+        contents=question,
+        config=types.GenerateContentConfig(
+            temperature=0,
+            response_mime_type="application/json",
+            response_schema=SqlAnswer,
+            system_instruction=(
+                "You write ONE Snowflake SQL SELECT statement (CTEs allowed) that answers the "
+                "question using only these tables. Always qualify tables as NOMAD_HUB.<schema>.<table>. "
+                "Never modify data. Return the SQL and a one-sentence explanation.\n"
+                f"{GUIDE}\nTables:{schema}"
+            ),
+        ),
     )
+    return response.parsed
 
 
-@st.cache_data(ttl=1800, show_spinner="Loading schema metadata...")
-def get_schema_context() -> str:
-    """Build a compact schema description for the LLM prompt."""
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    schema_parts = []
-
-    # Get all tables in MARTS + AI schemas
-    for schema in ("MARTS", "AI"):
-        try:
-            cursor.execute(f"SHOW TABLES IN SCHEMA NOMAD_HUB.{schema}")
-            tables = cursor.fetchall()
-        except Exception:
-            continue
-
-        for table_row in tables:
-            table_name = table_row[1]
-            full_name = f"NOMAD_HUB.{schema}.{table_name}"
-            try:
-                cursor.execute(f"DESCRIBE TABLE {full_name}")
-                cols = cursor.fetchall()
-                col_defs = ", ".join(f"{c[0]} ({c[1]})" for c in cols[:20])
-                schema_parts.append(f"  Table: {schema}.{table_name}\n  Columns: {col_defs}")
-            except Exception:
-                pass
-
-    return "\n\n".join(schema_parts)
+def is_safe(sql: str) -> tuple[bool, str]:
+    body = sql.strip().rstrip(";").strip()
+    without_strings = re.sub(r"'(?:[^']|'')*'", "''", body)
+    if ";" in without_strings:
+        return False, "Only a single statement is allowed."
+    if not re.match(r"^(select|with)\b", without_strings, re.IGNORECASE):
+        return False, "Only SELECT queries are allowed."
+    match = FORBIDDEN.search(without_strings)
+    if match:
+        return False, f"Keyword not allowed: {match.group(0).upper()}"
+    return True, body
 
 
-# ── SQL Safety Guard ──────────────────────────────────────────────────────────
-
-def validate_sql(sql: str) -> tuple[bool, str]:
-    """
-    Validate that the SQL is a safe SELECT statement.
-    Returns (is_safe, cleaned_sql_or_error).
-    """
-    # Strip markdown code fences
-    sql = re.sub(r"```(?:sql)?", "", sql, flags=re.IGNORECASE).strip("`").strip()
-
-    # Check it's a SELECT
-    first_keyword = sql.strip().split()[0].upper()
-    if first_keyword != "SELECT":
-        return False, f"Only SELECT statements are allowed. Got: {first_keyword}"
-
-    # Block dangerous keywords
-    dangerous = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
-                 "TRUNCATE", "MERGE", "EXECUTE", "EXEC", "CALL", "GRANT", "REVOKE"]
-    sql_upper = sql.upper()
-    for kw in dangerous:
-        if re.search(rf"\b{kw}\b", sql_upper):
-            return False, f"Statement contains disallowed keyword: {kw}"
-
-    # Inject row limit if not present
-    if "LIMIT" not in sql_upper:
-        sql = f"{sql.rstrip(';')}\nLIMIT {MAX_ROWS}"
-
-    return True, sql
+def run(sql: str, conn) -> pd.DataFrame:
+    cur = conn.cursor()
+    cur.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 60")
+    # Cap rows at fetch time: wrapping the query in SELECT * FROM (...) LIMIT n would let
+    # Snowflake drop the inner ORDER BY, silently returning the wrong "top" rows.
+    cur.execute(sql)
+    rows = cur.fetchmany(MAX_ROWS)
+    return pd.DataFrame(rows, columns=[c[0] for c in cur.description])
 
 
-# ── SQL Generation ─────────────────────────────────────────────────────────────
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Ask the NomadHub warehouse in plain English")
+    parser.add_argument("question")
+    args = parser.parse_args()
 
-SQL_SYSTEM_PROMPT = """You are an expert Snowflake SQL analyst for NomadHub, a travel booking platform.
-
-Database: NOMAD_HUB
-Available schemas: MARTS (Gold layer), AI (AI enrichment layer)
-
-Schema context:
-{schema}
-
-Rules:
-1. Generate ONLY valid Snowflake SQL SELECT statements.
-2. Use fully-qualified table names: NOMAD_HUB.MARTS.<table> or NOMAD_HUB.AI.<table>
-3. Do NOT use backticks; use double quotes for identifiers if needed.
-4. Do NOT add LIMIT — it will be added automatically.
-5. Return ONLY the SQL, no explanations, no markdown.
-6. Use appropriate aggregations and GROUP BY for analytical questions.
-7. For time-series: use DATE_TRUNC and join with DIM_DATE when useful.
-
-User question: {question}
-
-SQL:"""
-
-
-def generate_sql(question: str, schema_context: str) -> str:
-    prompt = SQL_SYSTEM_PROMPT.format(schema=schema_context, question=question)
-    response = CHAT_MODEL.generate_content(prompt)
-    return response.text.strip()
-
-
-def run_query(sql: str) -> pd.DataFrame:
-    conn = get_conn()
-    return pd.read_sql(sql, conn)
-
-
-# ── Streamlit UI ──────────────────────────────────────────────────────────────
-
-def main():
-    st.set_page_config(
-        page_title="NomadHub — SQL Assistant",
-        page_icon="🔍",
-        layout="wide",
-    )
-
-    st.markdown("""
-    <div style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-                padding: 2rem; border-radius: 12px; margin-bottom: 2rem;">
-        <h1 style="color: white; margin: 0; font-size: 2rem;">🔍 NomadHub SQL Assistant</h1>
-        <p style="color: rgba(255,255,255,0.9); margin: 0.5rem 0 0 0; font-size: 1.1rem;">
-            Ask questions in plain English — powered by Google Gemini text-to-SQL
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Load schema
-    schema_context = get_schema_context()
-
-    st.markdown("**💡 Example questions:**")
-    examples = [
-        "What are the top 10 destinations by total revenue?",
-        "Show monthly flight bookings by cabin class for 2024",
-        "What is the cancellation rate by travel purpose?",
-        "Which hotel categories have the highest average nightly rate?",
-        "Show the top 5 airlines by number of completed bookings",
-    ]
-    cols = st.columns(len(examples))
-    for col, ex in zip(cols, examples):
-        if col.button(ex[:40] + "...", use_container_width=True, help=ex):
-            st.session_state["nl_question"] = ex
-
-    st.divider()
-
-    question = st.text_area(
-        "Your question:",
-        value=st.session_state.get("nl_question", ""),
-        placeholder="e.g. What is the average hotel booking value by country?",
-        height=80,
-    )
-
-    col1, col2 = st.columns([1, 5])
-    run_btn = col1.button("▶ Run Query", type="primary", use_container_width=True)
-    col2.caption("Generates a SELECT query and runs it on your Snowflake MARTS schema")
-
-    if run_btn and question:
-        # Generate SQL
-        with st.spinner("Generating SQL with Gemini..."):
-            raw_sql = generate_sql(question, schema_context)
-
-        st.markdown("### Generated SQL")
-        is_safe, validated_sql = validate_sql(raw_sql)
-
-        if not is_safe:
-            st.error(f"🚫 SQL Validation Failed: {validated_sql}")
-            st.code(raw_sql, language="sql")
-            return
-
-        st.code(validated_sql, language="sql")
-
-        # Execute
-        with st.spinner("Running query on Snowflake..."):
-            try:
-                df = run_query(validated_sql)
-            except Exception as e:
-                st.error(f"❌ Query execution failed: {e}")
-                return
-
-        # Results
-        st.markdown(f"### Results ({len(df):,} rows)")
-        if len(df) == 0:
-            st.info("Query returned no results.")
-        else:
-            st.dataframe(df, use_container_width=True, height=400)
-
-            # Quick visualisation hint
-            if len(df.columns) >= 2:
-                numeric_cols = df.select_dtypes("number").columns.tolist()
-                cat_cols = df.select_dtypes(["object", "string"]).columns.tolist()
-                if numeric_cols and cat_cols:
-                    try:
-                        import plotly.express as px
-                        fig = px.bar(
-                            df.head(20),
-                            x=cat_cols[0],
-                            y=numeric_cols[0],
-                            title=f"{numeric_cols[0]} by {cat_cols[0]}",
-                            template="plotly_white",
-                            color_discrete_sequence=["#667eea"],
-                        )
-                        fig.update_layout(showlegend=False)
-                        st.plotly_chart(fig, use_container_width=True)
-                    except Exception:
-                        pass
-
-            # Download
-            csv = df.to_csv(index=False)
-            st.download_button(
-                "⬇ Download CSV",
-                csv,
-                "nomad_hub_query_result.csv",
-                "text/csv",
-            )
+    conn = reader_connection()
+    result = generate_sql(args.question, schema_description(conn))
+    print(f"-- {result.explanation}\n{result.sql}\n")
+    ok, sql_or_reason = is_safe(result.sql)
+    if not ok:
+        raise SystemExit(f"Rejected: {sql_or_reason}")
+    with pd.option_context("display.width", 160, "display.max_columns", 12):
+        print(run(sql_or_reason, conn).head(20))
+    conn.close()
 
 
 if __name__ == "__main__":
