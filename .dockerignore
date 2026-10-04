@@ -1,0 +1,13 @@
+# Keep build contexts small: never send data, envs, caches or secrets to the daemon.
+data/
+.venv/
+.git/
+.env
+**/__pycache__/
+nomad_hub/target/
+nomad_hub/dbt_packages/
+nomad_hub/logs/
+airflow/logs/
+terraform/.terraform/
+*.tfstate*
+*.p8

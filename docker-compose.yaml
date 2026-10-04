@@ -1,7 +1,8 @@
-# NomadHub — local orchestration (Airflow 3, LocalExecutor)
+# NomadHub — local orchestration (Airflow 3, LocalExecutor) + dashboard
 #
 #   docker compose build
 #   docker compose up -d                 # Airflow UI: http://localhost:8080 (admin / admin)
+#   docker compose --profile app up -d   # + dashboard: http://localhost:8501
 #
 # Needs in .env: SNOWFLAKE_ACCOUNT, GEMINI_API_KEY, AIRFLOW_JWT_SECRET (see .env.example)
 # and the Snowflake key pairs in ~/.nomadhub/keys (scripts/generate_snowflake_keys.sh).
@@ -106,6 +107,24 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+
+  dashboard:                        # Streamlit, read-only (STREAMLIT_SVC / ANALYST_ROLE)
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    user: "${AIRFLOW_UID:-1000}"     # non-root; same uid as the host so the keys are readable
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      APP_SNOWFLAKE_USER: STREAMLIT_SVC
+      SNOWFLAKE_KEY_DIR: /keys
+      HOME: /tmp
+    volumes:
+      - ${NOMADHUB_KEY_DIR:-~/.nomadhub/keys}:/keys:ro
+    ports: ["8501:8501"]
+    restart: unless-stopped
 
 volumes:
   airflow-db:

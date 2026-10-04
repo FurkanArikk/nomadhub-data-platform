@@ -51,4 +51,4 @@ jobs:
       - name: Install ruff
         run: pip install ruff
       - name: Lint Python files
-        run: ruff check data/ scripts/ ai/ streamlit/ airflow/dags/
+        run: ruff check data/ scripts/ ai/ dashboard/ airflow/dags/

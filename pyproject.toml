@@ -88,7 +88,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 # scripts import siblings directly (python ai/rag.py, python data/generate_data.py)
-known-first-party = ["common", "enrich_reviews", "rag", "text_to_sql", "sources"]
+known-first-party = ["common", "enrich_reviews", "rag", "text_to_sql", "sources", "nomad"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

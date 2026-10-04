@@ -1,0 +1,6 @@
+# Streamlit reads this from the working directory (repo root locally, /app in Docker).
+[theme]
+primaryColor = "#2a78d6"   # reference palette blue; Streamlit's default red reads as an error state
+
+[browser]
+gatherUsageStats = false
