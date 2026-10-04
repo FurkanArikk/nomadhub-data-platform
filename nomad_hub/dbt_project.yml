@@ -34,6 +34,10 @@ models:
       business:
         +materialized: table
         +tags: ["mart"]
+      ai:                          # needs ai/enrich_reviews.py to have run: dbt build --select tag:ai
+        +schema: AI
+        +materialized: table
+        +tags: ["ai"]
 
 seeds:
   nomad_hub:

@@ -1,0 +1,35 @@
+version: 2
+
+sources:
+  - name: ai
+    database: NOMAD_HUB
+    schema: AI
+    description: "Tables written by the Python AI jobs (Gemini), modelled by dbt like any other source."
+    config:
+      tags: ["ai"]
+    tables:
+      - name: review_enrichments
+        description: "ai/enrich_reviews.py — sentiment, language, topics, complaint, disruption flag per review."
+        columns:
+          - name: review_id
+            data_tests: [unique, not_null]
+          - name: sentiment
+            data_tests:
+              - accepted_values: {arguments: {values: ['positive', 'neutral', 'negative', 'mixed']}}
+      - name: review_embeddings
+        description: "ai/rag.py — VECTOR(FLOAT, 768) embeddings for retrieval."
+
+models:
+  - name: mart_review_insights
+    description: "What guests talk about and how they feel, by review month × city × topic."
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments: {combination_of_columns: [month, city, topic]}
+
+  - name: mart_delay_impact
+    description: >
+      Does the real arrival delay of a guest's flight show up in their review?
+      Completed US stays whose guest flew in on a booked BTS flight, by delay bucket.
+    columns:
+      - name: delay_bucket
+        data_tests: [unique, not_null]
