@@ -39,8 +39,8 @@ with right:
                            hovertemplate="%{y}: $%{x:,.0f} per night<extra></extra>"))
     fig.update_xaxes(tickprefix="$")
     show(style(fig, height=560), d)
-    st.caption("New York's low rate is real: its short-term-rental law forces 30-night minimum stays, "
-               "which are priced like monthly rentals.")
+    st.caption("New York's short-term-rental law forces 30-night minimum stays: its stays average "
+               "~17 nights, the longest of the 20 cities, priced closer to monthly rentals.")
 
 st.subheader("Seasonality")
 names = sorted(cities.city)

@@ -1,86 +1,22 @@
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.backends.legacy:build"
+# Project metadata and tool config. This is an application, not an installable package:
+# dependencies live in requirements.txt (local dev), airflow/Dockerfile and dashboard/Dockerfile.
 
 [project]
-name = "nomad-hub-data-engineering"
-version = "1.0.0"
-description = "AI-powered travel data engineering pipeline: S3 → Snowflake → dbt → Gemini → Streamlit"
+name = "nomadhub"
+version = "2.0.0"
+description = "AI-powered travel data platform: S3 → Snowflake → dbt → Airflow → Gemini → Streamlit, on ~294M rows of real public data"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
-authors = [{ name = "Your Name", email = "your@email.com" }]
-keywords = ["data-engineering", "dbt", "snowflake", "airflow", "gemini", "streamlit"]
+authors = [{ name = "FurkanArikk" }]
+keywords = ["data-engineering", "snowflake", "dbt", "airflow", "terraform", "gemini", "rag", "streamlit"]
 
 [project.urls]
-Repository = "https://github.com/yourusername/nomad-hub-data-engineering"
-
-# ── Data Generator ────────────────────────────────────────────────────────────
-[project.optional-dependencies]
-generator = [
-    "faker>=26.0",
-    "pandas>=2.2",
-    "pyarrow>=16.0",
-    "tqdm>=4.66",
-    "numpy>=1.26",
-    "requests>=2.31",
-    "duckdb>=1.1",
-]
-
-# ── AWS Upload ─────────────────────────────────────────────────────────────────
-aws = [
-    "boto3>=1.34",
-    "tqdm>=4.66",
-]
-
-# ── Cloud helpers (scripts/run_sql.py) ─────────────────────────────────────────
-cloud = [
-    "snowflake-connector-python>=3.12",
-]
-
-# ── dbt ───────────────────────────────────────────────────────────────────────
-dbt = [
-    "dbt-snowflake>=1.8",
-    "dbt-core>=1.8",
-]
-
-# ── Airflow ───────────────────────────────────────────────────────────────────
-airflow = [
-    "apache-airflow>=3.0",
-    "apache-airflow-providers-snowflake>=5.3",
-    "apache-airflow-providers-amazon>=8.25",
-]
-
-# ── AI Layer ──────────────────────────────────────────────────────────────────
-ai = [
-    "google-generativeai>=0.7",
-    "faiss-cpu>=1.8",
-    "snowflake-connector-python>=3.12",
-    "pandas>=2.2",
-    "tqdm>=4.66",
-]
-
-# ── Streamlit Dashboard ───────────────────────────────────────────────────────
-streamlit = [
-    "streamlit>=1.37",
-    "plotly>=5.23",
-    "pandas>=2.2",
-    "snowflake-connector-python>=3.12",
-    "google-generativeai>=0.7",
-    "faiss-cpu>=1.8",
-]
-
-# ── All dev dependencies ──────────────────────────────────────────────────────
-dev = [
-    "nomad-hub-data-engineering[generator,aws,ai,streamlit]",
-    "pytest>=8.3",
-    "ruff>=0.6",
-    "pre-commit>=3.8",
-]
+Repository = "https://github.com/FurkanArikk/zomata_data_eng"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -89,7 +25,3 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 # scripts import siblings directly (python ai/rag.py, python data/generate_data.py)
 known-first-party = ["common", "enrich_reviews", "rag", "text_to_sql", "sources", "nomad"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
