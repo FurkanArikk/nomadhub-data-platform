@@ -1,4 +1,4 @@
-name: dbt CI — Compile & Test
+name: CI — dbt parse & Python lint
 
 on:
   pull_request:
@@ -11,45 +11,34 @@ on:
       - "nomad_hub/**"
 
 jobs:
-  dbt-compile:
-    name: dbt compile + schema validation
+  dbt-parse:
+    name: dbt parse (no warehouse needed)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: nomad_hub
-
     env:
-      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-      SNOWFLAKE_USER:    ${{ secrets.SNOWFLAKE_USER }}
-      SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+      # parse never connects; the profile just needs a value to render
+      SNOWFLAKE_ACCOUNT: ci-placeholder
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: pip
 
       - name: Install dbt-snowflake
-        run: pip install dbt-snowflake==1.8.0
-
-      - name: Copy profiles template
-        run: |
-          mkdir -p ~/.dbt
-          cp profiles.yml.example ~/.dbt/profiles.yml
+        run: pip install "dbt-snowflake~=1.12.0"
 
       - name: dbt deps
-        run: dbt deps
+        run: dbt deps --profiles-dir .
 
-      - name: dbt compile (no Snowflake needed)
-        run: dbt compile --profiles-dir ~/.dbt --target dev
-
-      - name: dbt source freshness check (modified only, on main)
-        if: github.ref == 'refs/heads/main'
-        run: dbt source freshness --profiles-dir ~/.dbt --target dev
+      - name: dbt parse — SQL, refs, YAML and tests must all resolve
+        run: dbt parse --profiles-dir .
 
   lint:
     name: Python linting (ruff)
@@ -62,4 +51,4 @@ jobs:
       - name: Install ruff
         run: pip install ruff
       - name: Lint Python files
-        run: ruff check data/ aws/ ai/ streamlit/ airflow/dags/
+        run: ruff check data/ scripts/ ai/ streamlit/ airflow/dags/
