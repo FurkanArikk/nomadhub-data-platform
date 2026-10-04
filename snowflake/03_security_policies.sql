@@ -1,12 +1,13 @@
 -- ============================================================
--- NomadHub Snowflake Setup — Step 06: Row Access Policies
+-- NomadHub — Security policies (optional, run after dbt has built MARTS)
 -- ============================================================
--- Demonstrates row-level security — ANALYST_ROLE can only
--- read "completed" bookings; NOMAD_ADMIN sees everything.
--- This is an OPTIONAL advanced security feature.
+-- Row-level security and column masking for ANALYST_ROLE.
+-- Requires Snowflake Enterprise edition. Run as ACCOUNTADMIN.
+-- NOTE: policies attached with ALTER TABLE are lost when dbt recreates a table;
+-- the dbt models will attach them with post-hooks instead.
 -- ============================================================
 
-USE ROLE NOMAD_ADMIN;
+USE ROLE ACCOUNTADMIN;
 USE DATABASE NOMAD_HUB;
 USE SCHEMA MARTS;
 
@@ -15,7 +16,7 @@ CREATE OR REPLACE ROW ACCESS POLICY BOOKING_STATUS_POLICY
 AS (booking_status VARCHAR) RETURNS BOOLEAN ->
     CASE
         -- Admin and DBT can see all rows
-        WHEN CURRENT_ROLE() IN ('NOMAD_ADMIN', 'DBT_ROLE', 'SYSADMIN', 'ACCOUNTADMIN')
+        WHEN CURRENT_ROLE() IN ('DBT_ROLE', 'SYSADMIN', 'ACCOUNTADMIN')
             THEN TRUE
         -- Analyst can only see completed bookings (not cancelled, no_show)
         WHEN CURRENT_ROLE() = 'ANALYST_ROLE' AND booking_status = 'completed'
@@ -33,7 +34,7 @@ COMMENT = 'Analysts only see completed bookings';
 CREATE OR REPLACE MASKING POLICY EMAIL_MASK
 AS (email_val VARCHAR) RETURNS VARCHAR ->
     CASE
-        WHEN CURRENT_ROLE() IN ('NOMAD_ADMIN', 'DBT_ROLE') THEN email_val
+        WHEN CURRENT_ROLE() IN ('DBT_ROLE', 'SYSADMIN', 'ACCOUNTADMIN') THEN email_val
         -- Analysts see only the domain, not the full email
         ELSE CONCAT('***@', SPLIT_PART(email_val, '@', 2))
     END
@@ -42,7 +43,7 @@ COMMENT = 'Mask email addresses for ANALYST_ROLE';
 CREATE OR REPLACE MASKING POLICY PHONE_MASK
 AS (phone_val VARCHAR) RETURNS VARCHAR ->
     CASE
-        WHEN CURRENT_ROLE() IN ('NOMAD_ADMIN', 'DBT_ROLE') THEN phone_val
+        WHEN CURRENT_ROLE() IN ('DBT_ROLE', 'SYSADMIN', 'ACCOUNTADMIN') THEN phone_val
         ELSE '***-***-****'
     END
 COMMENT = 'Mask phone numbers for ANALYST_ROLE';
