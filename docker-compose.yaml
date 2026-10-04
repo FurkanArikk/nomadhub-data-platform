@@ -1,155 +1,111 @@
-name: nomadhub-platform
+# NomadHub — local orchestration (Airflow 3, LocalExecutor)
+#
+#   docker compose build
+#   docker compose up -d                 # Airflow UI: http://localhost:8080 (admin / admin)
+#
+# Needs in .env: SNOWFLAKE_ACCOUNT, GEMINI_API_KEY, AIRFLOW_JWT_SECRET (see .env.example)
+# and the Snowflake key pairs in ~/.nomadhub/keys (scripts/generate_snowflake_keys.sh).
+
+name: nomadhub
+
+x-airflow-common: &airflow-common
+  build: ./airflow
+  # Run as your host user so the read-only private keys (chmod 600) are readable
+  # and files dbt writes in the mounted project stay owned by you.
+  user: "${AIRFLOW_UID:-1000}:0"
+  env_file:
+    - path: .env
+      required: true
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    # Airflow 3 components talk through the API server: tasks must reach it by its
+    # service name (not localhost), and all components must share one JWT secret.
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?set AIRFLOW_JWT_SECRET in .env}
+
+    # Snowflake connection for COPY INTO — key-pair auth, LOADER_ROLE
+    AIRFLOW_CONN_SNOWFLAKE_DEFAULT: >-
+      {"conn_type": "snowflake", "login": "AIRFLOW_SVC",
+       "extra": {"account": "${SNOWFLAKE_ACCOUNT}", "warehouse": "NOMAD_WH",
+                 "database": "NOMAD_HUB", "schema": "RAW", "role": "LOADER_ROLE",
+                 "private_key_file": "/opt/airflow/keys/airflow_svc_rsa_key.p8"}}
+    # dbt (nomad_hub/profiles.yml) and the AI scripts run as AIRFLOW_SVC too
+    DBT_SNOWFLAKE_USER: AIRFLOW_SVC
+    DBT_PRIVATE_KEY_PATH: /opt/airflow/keys/airflow_svc_rsa_key.p8
+    AI_SNOWFLAKE_USER: AIRFLOW_SVC
+    SNOWFLAKE_KEY_DIR: /opt/airflow/keys
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./nomad_hub:/opt/airflow/nomad_hub
+    - ./ai:/opt/airflow/ai
+    - ./snowflake:/opt/airflow/sql:ro
+    - ${NOMADHUB_KEY_DIR:-~/.nomadhub/keys}:/opt/airflow/keys:ro
+  depends_on:
+    postgres:
+      condition: service_healthy
 
 services:
-  # ==========================================
-  # 1. Airflow Orchestration Layer
-  # ==========================================
   postgres:
     image: postgres:16-alpine
-    container_name: nomadhub-postgres
     environment:
-      POSTGRES_USER: ${AIRFLOW_DB_USER:-airflow}
-      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow}
-      POSTGRES_DB: ${AIRFLOW_DB_NAME:-airflow}
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
     volumes:
-      - airflow-postgres-data:/var/lib/postgresql/data
+      - airflow-db:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${AIRFLOW_DB_USER:-airflow}"]
-      interval: 10s
-      retries: 5
-      start_period: 5s
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
     restart: unless-stopped
-    networks:
-      - nomadhub-net
 
   airflow-init:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
-    container_name: nomadhub-airflow-init
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    command: >
-      bash -c "
+    <<: *airflow-common
+    # Keep the image's entrypoint: it sets up the environment for an arbitrary host uid
+    # (user: above). A "bash -c" command is passed through to bash after that setup.
+    command:
+      - bash
+      - -c
+      - |
         airflow db migrate &&
-        airflow users create
-          --username admin
-          --password admin
-          --firstname Admin
-          --lastname User
-          --role Admin
-          --email admin@nomad-hub.local || true
-      "
-    depends_on:
-      postgres:
-        condition: service_healthy
+        airflow users create --username admin --password admin --role Admin \
+          --firstname Nomad --lastname Admin --email admin@nomadhub.local || true
     restart: "no"
-    networks:
-      - nomadhub-net
 
-  airflow-webserver:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
-    container_name: nomadhub-airflow-webserver
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
-      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-      PYTHONPATH: /opt/airflow
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./ai:/opt/airflow/ai
-      - ./nomad_hub:/opt/airflow/nomad_hub
-    ports:
-      - "8080:8080"
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
-    restart: unless-stopped
-    networks:
-      - nomadhub-net
 
   airflow-scheduler:
-    build:
-      context: ./airflow
-      dockerfile: Dockerfile
-    container_name: nomadhub-airflow-scheduler
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres:5432/${AIRFLOW_DB_NAME:-airflow}
-      PYTHONPATH: /opt/airflow
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./ai:/opt/airflow/ai
-      - ./nomad_hub:/opt/airflow/nomad_hub
+    <<: *airflow-common
+    command: scheduler
+    restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
-    restart: unless-stopped
-    networks:
-      - nomadhub-net
 
-  # ==========================================
-  # 2. Streamlit & AI Dashboard Layer
-  # ==========================================
-  streamlit:
-    build:
-      context: .
-      dockerfile: streamlit/Dockerfile
-    container_name: nomadhub-streamlit
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      STREAMLIT_SERVER_PORT: 8501
-      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
-    volumes:
-      - ./streamlit:/app/streamlit
-      - ./ai:/app/ai
-      - ./data:/app/data
-    ports:
-      - "8501:8501"
+  airflow-dag-processor:            # Airflow 3: DAG parsing runs as its own component
+    <<: *airflow-common
+    command: dag-processor
     restart: unless-stopped
-    networks:
-      - nomadhub-net
-
-  # ==========================================
-  # 3. Data Utility Runner (Generator & Ingestion)
-  # ==========================================
-  data-runner:
-    build:
-      context: .
-      dockerfile: data/Dockerfile
-    container_name: nomadhub-data-runner
-    volumes:
-      - ./data:/app/data
-      - ./aws:/app/aws
-    profiles: ["tools"]
-    networks:
-      - nomadhub-net
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
 
 volumes:
-  airflow-postgres-data:
-
-networks:
-  nomadhub-net:
-    driver: bridge
+  airflow-db:
