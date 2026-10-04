@@ -1,218 +1,182 @@
-# NomadHub ✈️ — AI-Powered Travel Data Engineering
+# NomadHub — AI-powered travel data platform
 
-> **End-to-end batch data pipeline** for a travel & booking platform — from raw CSVs to AI-powered analytics, built as a portfolio project.
+An end-to-end data platform for a fictional travel company, built on **~294 million rows of
+real public data**: every US domestic flight from 2019–2025, Airbnb listings, calendars and
+reviews for 20 cities, the world's airports, and daily exchange rates. A synthetic booking
+layer is generated **on top of** those real events.
+
+**S3 → Snowflake → dbt → Airflow → Gemini (enrichment · RAG · text-to-SQL) → Streamlit**,
+with the cloud side fully in **Terraform**.
 
 ![Architecture](docs/architecture.png)
 
-[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://python.org)
-[![dbt](https://img.shields.io/badge/dbt-1.8-FF694B?logo=dbt&logoColor=white)](https://getdbt.com)
-[![Snowflake](https://img.shields.io/badge/Snowflake-Data_Warehouse-29B5E8?logo=snowflake&logoColor=white)](https://snowflake.com)
-[![Airflow](https://img.shields.io/badge/Apache_Airflow-3.0-017CEE?logo=apacheairflow&logoColor=white)](https://airflow.apache.org)
-[![Gemini](https://img.shields.io/badge/Google_Gemini-1.5_Flash-4285F4?logo=google&logoColor=white)](https://aistudio.google.com)
-[![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io)
-[![AWS S3](https://img.shields.io/badge/AWS-S3_Data_Lake-FF9900?logo=amazonaws&logoColor=white)](https://aws.amazon.com/s3)
+> Inspired by [darshilparmar/zomato-ai-data-engineering-end-to-end-project](https://github.com/darshilparmar/zomato-ai-data-engineering-end-to-end-project)
+> — same layered architecture, rebuilt with real data at ~8× the volume, infrastructure as code,
+> key-pair security and an in-warehouse vector store. See [What's different](#whats-different-from-the-reference).
 
 ---
 
-## What is NomadHub?
+## What the data shows
 
-NomadHub simulates a real-world travel & booking platform's data infrastructure. The pipeline ingests flight reservations, hotel bookings, and customer reviews — transforming raw data through **medallion layers** (Bronze → Silver → Gold) and enriching it with **AI capabilities** powered by Google Gemini.
+All numbers come from the marts, and anyone with the repo can rebuild them.
 
-### Data Scale
-| Table | Description | Rows |
-|---|---|---|
-| `countries` | Country & city reference | ~250 |
-| `airports` | Airport catalog (IATA codes) | ~10K |
-| `hotels` | Hotel profiles & categories | ~50K |
-| `users` | User accounts & profiles | ~1M |
-| `flights` | Flight bookings (**FACT**) | **~12M** |
-| `hotel_bookings` | Hotel reservations (**FACT**) | **~15M** |
-| `reviews` | Free-text travel reviews | **~400K** |
+- **2020 broke US aviation, and punctuality hasn't recovered.** Flights fell from ~640K/month
+  to **181K in May 2020**. That year was the most punctual on record (90% on time, empty skies)
+  with 6% of flights cancelled. Punctuality never returned to the 2019 level (80.9%) and hit
+  its low in **2025: 77.7%**.
+- **The gap between airlines is wide.** In 2025 Hawaiian arrived on time 82.7% of the time,
+  Frontier 72.1%. Over the whole period, late-arriving aircraft and the airlines themselves
+  cause most delay minutes; weather causes far less.
+- **Noise is what guests complain about most.** Out of 1,000 multilingual reviews read by
+  Gemini (18 languages), ~55% of those that mention noise are negative or mixed, far ahead of
+  value (~30%) and cleanliness.
+- **Regulation shows up in behaviour.** New York stays average **16.6 nights**, against 9.9 for
+  the next-longest city, because its short-term-rental law forces 30-night minimum stays.
+
+---
+
+## Data — what's real and what's generated
+
+| Table | Rows | Source | Real? |
+|---|---|---|---|
+| `flights` | 45.8M | [BTS On-Time Performance](https://www.transtats.bts.gov/), 2019-01 → 2025-12 | ✅ real (public domain) |
+| `calendar` | 188.3M | [Inside Airbnb](https://insideairbnb.com/get-the-data/), 365-day availability | ✅ real (CC BY 4.0) |
+| `reviews` | 22.1M | Inside Airbnb, review text in many languages | ✅ real (CC BY 4.0) |
+| `listings` | 514K | Inside Airbnb, 10 US + 10 international cities | ✅ real (CC BY 4.0) |
+| `airports` / `countries` / `regions` | 90K | [OurAirports](https://ourairports.com/data/) | ✅ real (public domain) |
+| `fx_rates_daily` (seed) | 23K | [ECB reference rates](https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/) | ✅ real |
+| `users` | 12.6M | one per real reviewer, **pseudonymised** (fake name, email, home) | 🧪 synthetic attributes |
+| `stay_bookings` | 17.9M | one completed stay per real review + cancelled bookings | 🧪 synthetic, anchored on real reviews |
+| `flight_bookings` | 6.9M | US travellers placed on **real** BTS flights to their stay's city | 🧪 synthetic, outcomes are real |
+
+No platform publishes its customers, so the generator ([`data/generate_data.py`](data/generate_data.py))
+builds only that layer, and always around a real event. A stay checks out shortly before a
+real review was written. A flight booking sits on a real flight, so if BTS says that flight
+was cancelled, the booking was cancelled too. Personal data (reviewer/host names, profile
+URLs) is dropped at download.
 
 ---
 
 ## Architecture
 
+| Layer | Where | What |
+|---|---|---|
+| **Sources** | [`data/`](data/) | Resumable downloaders for BTS, Inside Airbnb, OurAirports, ECB; DuckDB generator for the synthetic layer |
+| **Lake** | Amazon S3 | `raw/<table>/<partition>/*.csv.gz`, one file per month / city snapshot; versioned, encrypted, private |
+| **Bronze** | Snowflake `RAW` | `COPY INTO` through a keyless storage integration; all-VARCHAR tables + `_SOURCE_FILE` / `_LOADED_AT` lineage |
+| **Silver** | Snowflake `STAGING` | 10 dbt views: typing (BTS `"0659"` times, `"1.00"` flags), local-currency prices, HTML-free review text, dedup across snapshots |
+| **Gold** | Snowflake `MARTS` | 6 dimensions, 3 **incremental MERGE** facts keyed on `_LOADED_AT`, 5 business marts, an SCD2 snapshot of listing prices |
+| **AI** | Snowflake `AI` | Gemini review enrichment, **RAG with Snowflake `VECTOR`**, text-to-SQL; 2 AI marts |
+| **Orchestration** | Airflow 3.3 (Docker) | One daily DAG: `ingest → transform → ai`; every step incremental |
+| **Serve** | Streamlit | 7-page dashboard incl. chat-with-reviews and ask-the-warehouse |
+| **Infra** | Terraform | S3, IAM, warehouse + credit cap, database, roles, service users, integration, stage |
+
+**dbt:** 26 models · 94 data tests (keys, relationships, accepted values/ranges, mart grains,
+a RAW-to-fact reconciliation test) · 5 seeds · 1 snapshot.
+
+### The AI lane
+
+1. **LLM enrichment:** [`ai/enrich_reviews.py`](ai/enrich_reviews.py) sends 25 reviews per
+   Gemini call with a typed JSON schema (sentiment, language, topics, complaint, travel-disruption
+   flag, English summary). Failed batches are never written, so they're retried on the next run
+   instead of being stored as fake "neutral" rows.
+2. **RAG:** [`ai/rag.py`](ai/rag.py) stores embeddings as `VECTOR(FLOAT, 768)` **inside Snowflake**
+   and retrieves with `VECTOR_COSINE_SIMILARITY` in SQL. There's no separate vector DB, and the
+   same grants apply. Retrieval works across languages: a Turkish question finds Spanish and
+   Portuguese reviews.
+3. **Text-to-SQL:** [`ai/text_to_sql.py`](ai/text_to_sql.py) reads the live schema, generates
+   one SELECT, rejects anything else, and runs as the **read-only** `ANALYST_ROLE`. The role is
+   the real safety boundary.
+
+---
+
+## What's different from the reference
+
+| | Reference (Zomato) | NomadHub |
+|---|---|---|
+| Data | ~33M rows; real dimensions, generated facts | ~294M rows; real facts (flights, reviews, calendar) + anchored synthetic bookings |
+| Cloud setup | console clicks + SQL worksheets | **Terraform**, including the S3 ↔ Snowflake trust handshake |
+| Snowflake auth | password | **key-pair** service users, 3 least-privilege roles, resource monitor |
+| Loading | single files, reloaded daily | gzip files partitioned by month/city; COPY loads only new files |
+| Incremental facts | `max(timestamp)` filter | MERGE on the RAW `_LOADED_AT` lineage column |
+| LLM enrichment | 1 call per review; failures saved as rows | 25 reviews per call, typed schema; failures retried, never stored |
+| Vector store | parquet file on disk | Snowflake `VECTOR` + cosine similarity in SQL |
+| Text-to-SQL | runs as the write role | runs as the read-only analyst role |
+| Airflow | Airflow 3 | Airflow 3 + isolated dbt/AI virtualenvs, key-mounted containers |
+| CI | none | dbt parse + ruff on every PR |
+
+---
+
+## Run it
+
+Full step-by-step setup (AWS account, Snowflake trial, keys, Terraform, loading):
+**[CLOUD.md](CLOUD.md)**. The short version:
+
+```bash
+# 1. Data (≈1–2 h download, ≈4 min generation)
+pip install -r requirements.txt
+python data/download_sources.py all          # BTS, Inside Airbnb, OurAirports, ECB → data/raw/
+python data/generate_data.py                 # users + bookings on top of the real data
+
+# 2. Cloud (see CLOUD.md for the one-time manual steps)
+scripts/generate_snowflake_keys.sh
+cd terraform && terraform init && terraform apply && cd ..
+scripts/upload_raw.sh
+python scripts/run_sql.py snowflake/01_raw_tables.sql
+python scripts/run_sql.py snowflake/02_copy_into.sql
+
+# 3. Transform
+cd nomad_hub && dbt deps --profiles-dir . && dbt build --exclude tag:ai --profiles-dir . && cd ..
+
+# 4. AI (needs GEMINI_API_KEY in .env)
+python ai/enrich_reviews.py --limit 500
+python ai/rag.py index --limit 20000
+(cd nomad_hub && dbt build --select tag:ai --profiles-dir .)
+
+# 5. Orchestrate + serve
+docker compose --profile app up -d           # Airflow :8080 (admin/admin) · dashboard :8501
 ```
-SOURCE              LAKE          BRONZE            SILVER           GOLD            SERVE
-NomadHub        →  Amazon S3  →  Snowflake RAW  →  STAGING (dbt) →  MARTS (dbt)  →  Streamlit
-Dataset            raw/           COPY INTO         clean·type·      dims·incr.       BI Dashboard
-7 CSVs             7 folders      storage int.      join·views       facts·marts      AI Chat Apps
 
-AI LANE  ·  THREE CAPABILITIES  ·  Google Gemini
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-① LLM ENRICHMENT   stg_reviews → enrich_reviews.py → AI.REVIEW_ENRICHED → mart_review_insights
-② RAG              reviews     → embed→vectors      → FAISS store      → rag_chat.py
-③ TEXT-TO-SQL      MARTS schema→ text_to_sql.py     → SELECT guard     → run as DBT_ROLE
+Smaller dev set: `download_sources.py all --sample` and `generate_data.py --sample`
+(1 BTS month, 2 cities).
 
-ORCHESTRATION  ·  Apache Airflow 3 (Docker)  ·  TaskGroup-based modular DAG
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[ingest] → [transform] → [ai_enrich] → [ai_marts]
+**Cost.** S3 ≈ $0.15/month. Snowflake runs on the $400 trial credit, and the whole build
+uses a few credits on an X-Small warehouse capped by a resource monitor. Gemini: enriching
+500 reviews and embedding 20K costs well under $1.
+
+---
+
+## Repository
+
+```
+├── data/                 downloaders (sources/), synthetic generator, data/raw/ (gitignored)
+├── terraform/            AWS + Snowflake infrastructure
+├── snowflake/            bootstrap SQL, RAW tables, COPY INTO, security policies
+├── scripts/              key generation, S3 upload, run a SQL file
+├── nomad_hub/            dbt project (staging, marts, ai, seeds, snapshot, tests)
+├── ai/                   Gemini enrichment, RAG, text-to-SQL
+├── airflow/              Dockerfile + DAG
+├── dashboard/            Streamlit app
+├── docs/                 architecture diagram
+├── docker-compose.yaml   Airflow 3 + dashboard
+└── CLOUD.md              cloud setup guide
 ```
 
 ---
 
-## Tech Stack
+## Honest limits
 
-| Layer | Technology |
-|---|---|
-| Language | Python 3.11, SQL |
-| Data Lake | Amazon S3 |
-| Data Warehouse | Snowflake |
-| Transformation | dbt (dbt-snowflake 1.8) |
-| Orchestration | Apache Airflow 3.0 (Docker) |
-| AI / LLM | Google Gemini 1.5 Flash |
-| AI / Embeddings | Google text-embedding-004 |
-| Vector Store | FAISS (local) |
-| Serving | Streamlit |
-| CI/CD | GitHub Actions |
+- **Bookings are synthetic.** They're anchored on real reviews and flights, but the link
+  between a reviewer and a flight is generated. `mart_delay_impact` (does a delayed arrival
+  show up in the review?) therefore shows *no* effect and is kept only as a demonstration of
+  the join, not a finding.
+- **Occupancy is a proxy.** An unavailable calendar night is booked *or* blocked by the host.
+- **AI coverage is a sample.** 1,000 reviews are enriched and 22.9K embedded, out of 22M.
+  The DAG adds more every day.
+- **Flights are US-only** (BTS), so international stays have no flight leg.
 
----
+## Credits & licences
 
-## Repository Structure
-
-```
-nomad-hub-data-engineering/
-├── data/
-│   └── generate_data.py          # Synthetic data generator (Faker + Pandas)
-├── aws/
-│   ├── iam/s3_policy.json        # Minimum-privilege S3 IAM policy
-│   └── upload_to_s3.py           # Parallel S3 upload with progress bars
-├── snowflake/
-│   ├── 01_setup.sql              # Warehouse, DB, schemas, roles
-│   ├── 02_storage_integration.sql# Keyless S3 → Snowflake link
-│   ├── 03_stage_and_formats.sql  # External stage + CSV file format
-│   ├── 04_raw_tables.sql         # Bronze DDL (7 tables)
-│   ├── 05_copy_into.sql          # COPY INTO from S3 stage
-│   └── 06_row_access_policies.sql# Row-level security example
-├── nomad_hub/                    # dbt project
-│   ├── models/staging/           # 7 Silver views
-│   ├── models/marts/             # Dims + Incremental Facts + 5 Business Marts
-│   └── macros/                   # Custom schema routing + generic tests
-├── airflow/
-│   ├── Dockerfile
-│   ├── docker-compose.yaml
-│   ├── example.env
-│   └── dags/nomad_pipeline.py    # 4-TaskGroup modular DAG
-├── ai/
-│   ├── enrich_reviews.py         # Gemini batch enrichment
-│   ├── rag_chat.py               # RAG "chat with reviews" (Streamlit)
-│   ├── text_to_sql.py            # NL→SQL assistant (Streamlit)
-│   └── example.env
-├── streamlit/
-│   └── app.py                    # Multi-page BI dashboard + AI apps
-└── .github/
-    └── workflows/dbt_ci.yml      # dbt compile + test on PR
-```
-
----
-
-## Quick Start
-
-### Prerequisites
-- Python 3.11+
-- Docker & Docker Compose
-- AWS account (S3 bucket)
-- Snowflake account (trial is fine)
-- Google AI Studio API key (free): https://aistudio.google.com/
-
-### 1. Generate Synthetic Data
-```bash
-cd data
-pip install faker pandas pyarrow tqdm
-python generate_data.py
-# Produces: countries.csv, airports.csv, hotels.csv, users.csv,
-#           flights.csv (~12M rows), hotel_bookings.csv (~15M rows), reviews.csv (~400K rows)
-```
-
-### 2. Upload to S3
-```bash
-cd aws
-pip install boto3 tqdm
-# Configure AWS credentials: aws configure
-python upload_to_s3.py --bucket your-nomad-hub-bucket --data-dir ../data
-```
-
-### 3. Snowflake Setup
-Run SQL files in Snowsight in order:
-```
-snowflake/01_setup.sql
-snowflake/02_storage_integration.sql  ← requires AWS ARN from step 2
-snowflake/03_stage_and_formats.sql
-snowflake/04_raw_tables.sql
-snowflake/05_copy_into.sql
-```
-
-### 4. dbt Transformation
-```bash
-cd nomad_hub
-pip install dbt-snowflake
-cp profiles.yml.example ~/.dbt/profiles.yml
-# Edit ~/.dbt/profiles.yml with your Snowflake credentials
-dbt deps
-dbt run
-dbt test
-```
-
-### 5. Airflow Orchestration
-```bash
-cd airflow
-cp example.env .env
-# Edit .env with your credentials
-docker compose up -d
-# Open: http://localhost:8080  (admin / admin)
-# Trigger DAG: nomad_hub_pipeline
-```
-
-### 6. AI Layer
-```bash
-cd ai
-cp example.env .env
-# Edit .env with GEMINI_API_KEY + Snowflake credentials
-pip install google-generativeai faiss-cpu streamlit snowflake-connector-python
-
-# Run LLM enrichment (can also run via Airflow)
-python enrich_reviews.py
-
-# Launch AI apps
-streamlit run rag_chat.py          # Chat with reviews
-streamlit run text_to_sql.py       # Query warehouse in natural language
-```
-
-### 7. Full Dashboard
-```bash
-cd streamlit
-pip install streamlit plotly pandas snowflake-connector-python
-streamlit run app.py
-# Open: http://localhost:8501
-```
-
----
-
-## dbt Data Lineage
-
-```
-RAW.flights           → stg_flights        → fct_flights (INCREMENTAL)      ─┐
-RAW.hotel_bookings    → stg_hotel_bookings → fct_hotel_bookings (INCREMENTAL)─┤
-RAW.hotels            → stg_hotels         → dim_hotels (SCD2 snapshot)      ─┼─→ mart_revenue_summary
-RAW.airports          → stg_airports       → dim_destinations                ─┤    mart_destination_perf
-RAW.users             → stg_users          → dim_users                       ─┤    mart_cancellation
-RAW.countries         → stg_countries      ─────────────────────────────────-┘    mart_user_cohort
-RAW.reviews           → stg_reviews        → AI.REVIEW_ENRICHED              ──→  mart_review_insights
-```
-
----
-
-## Key Design Decisions
-
-1. **Gemini over OpenAI** — Google's `text-embedding-004` matches OpenAI's `text-embedding-3-small` quality at lower cost with a generous free tier.
-2. **TaskGroup DAG** — Each pipeline stage is a self-contained TaskGroup; failures are isolated and retryable per stage.
-3. **MERGE-based incremental models** — `fct_flights` and `fct_hotel_bookings` use `unique_key` MERGE to handle late-arriving data without full refresh.
-4. **3-role Snowflake security** — `NOMAD_ADMIN`, `DBT_ROLE` (transform), `ANALYST_ROLE` (read-only) follows least-privilege principle.
-5. **FAISS vector store** — Keeps the RAG component self-contained without additional managed services.
-
----
-
-## License
-
-MIT — feel free to fork and adapt for your own portfolio.
+Flight data: US Bureau of Transportation Statistics (public domain). Listings, calendars and
+reviews: [Inside Airbnb](https://insideairbnb.com), CC BY 4.0. Airports: OurAirports (public
+domain). Exchange rates: Source: ECB. Code: MIT.
