@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (gitignored) and fill in. See CLOUD.md.
+
+bucket_name                 = "nomadhub-yourname-raw"   # globally unique
+snowflake_organization_name = "ABCDEFG"                 # from ORGNAME-ACCOUNTNAME
+snowflake_account_name      = "XY12345"
+snowflake_human_user        = "YOUR_SNOWFLAKE_LOGIN"    # optional: grants you the project roles
+
+# Defaults — change only if needed
+# aws_region           = "eu-central-1"
+# aws_profile          = "nomadhub"
+# snowflake_key_dir    = "~/.nomadhub/keys"
+# monthly_credit_quota = 50
