@@ -1,7 +1,7 @@
 """
 NomadHub dashboard
 ==================
-    streamlit run dashboard/app.py            (or: docker compose --profile app up -d)
+    docker compose --profile app up -d dashboard      → http://localhost:8501
 
 Pages read the dbt marts as STREAMLIT_SVC / ANALYST_ROLE (read-only). The two AI pages
 call Gemini: RAG over the review embeddings in Snowflake, and text-to-SQL.

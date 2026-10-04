@@ -109,31 +109,34 @@ a RAW-to-fact reconciliation test) · 5 seeds · 1 snapshot.
 
 ## Run it
 
-Full step-by-step setup (AWS account, Snowflake trial, keys, Terraform, loading):
-**[CLOUD.md](CLOUD.md)**. The short version:
+Everything runs in Docker; the host needs nothing but Docker. One-off commands go through
+the **toolbox** container (Terraform, AWS CLI, Python, dbt), long-running services through
+Compose. Full step-by-step cloud setup: **[CLOUD.md](CLOUD.md)**. The short version:
 
 ```bash
-# 1. Data (≈1–2 h download, ≈4 min generation)
-pip install -r requirements.txt
-python data/download_sources.py all          # BTS, Inside Airbnb, OurAirports, ECB → data/raw/
-python data/generate_data.py                 # users + bookings on top of the real data
+docker compose build
+alias nh='docker compose run --rm tools'     # toolbox: repo + ~/.aws + ~/.nomadhub/keys mounted
 
-# 2. Cloud (see CLOUD.md for the one-time manual steps)
-scripts/generate_snowflake_keys.sh
-cd terraform && terraform init && terraform apply && cd ..
-scripts/upload_raw.sh
-python scripts/run_sql.py snowflake/01_raw_tables.sql
-python scripts/run_sql.py snowflake/02_copy_into.sql
+# 1. Data (≈1–2 h download, ≈4 min generation)
+nh python data/download_sources.py all       # BTS, Inside Airbnb, OurAirports, ECB → data/raw/
+nh python data/generate_data.py              # users + bookings on top of the real data
+
+# 2. Cloud (one-time manual steps first: see CLOUD.md)
+nh terraform -chdir=terraform init && nh terraform -chdir=terraform apply
+nh scripts/upload_raw.sh
+nh python scripts/run_sql.py snowflake/01_raw_tables.sql
+nh python scripts/run_sql.py snowflake/02_copy_into.sql
 
 # 3. Transform
-cd nomad_hub && dbt deps --profiles-dir . && dbt build --exclude tag:ai --profiles-dir . && cd ..
+nh dbt deps  --project-dir nomad_hub
+nh dbt build --project-dir nomad_hub --exclude tag:ai
 
 # 4. AI (needs GEMINI_API_KEY in .env)
-python ai/enrich_reviews.py --limit 500
-python ai/rag.py index --limit 20000
-(cd nomad_hub && dbt build --select tag:ai --profiles-dir .)
+nh python ai/enrich_reviews.py --limit 500
+nh python ai/rag.py index --limit 20000
+nh dbt build --project-dir nomad_hub --select tag:ai
 
-# 5. Orchestrate + serve
+# 5. Orchestrate + serve (the daily DAG then repeats steps 2-4 incrementally)
 docker compose --profile app up -d           # Airflow :8080 (admin/admin) · dashboard :8501
 ```
 
@@ -157,8 +160,9 @@ uses a few credits on an X-Small warehouse capped by a resource monitor. Gemini:
 ├── ai/                   Gemini enrichment, RAG, text-to-SQL
 ├── airflow/              Dockerfile + DAG
 ├── dashboard/            Streamlit app
+├── tools/                toolbox image for one-off commands (dbt, Python, Terraform, AWS CLI)
 ├── docs/                 architecture diagram
-├── docker-compose.yaml   Airflow 3 + dashboard
+├── docker-compose.yaml   Airflow 3 + dashboard + toolbox
 └── CLOUD.md              cloud setup guide
 ```
 

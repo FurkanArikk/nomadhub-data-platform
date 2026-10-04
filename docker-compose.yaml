@@ -3,6 +3,7 @@
 #   docker compose build
 #   docker compose up -d                 # Airflow UI: http://localhost:8080 (admin / admin)
 #   docker compose --profile app up -d   # + dashboard: http://localhost:8501
+#   docker compose run --rm tools <cmd>  # one-off commands: dbt, ai/, data/, terraform, aws
 #
 # Needs in .env: SNOWFLAKE_ACCOUNT, GEMINI_API_KEY, AIRFLOW_JWT_SECRET (see .env.example)
 # and the Snowflake key pairs in ~/.nomadhub/keys (scripts/generate_snowflake_keys.sh).
@@ -125,6 +126,22 @@ services:
       - ${NOMADHUB_KEY_DIR:-~/.nomadhub/keys}:/keys:ro
     ports: ["8501:8501"]
     restart: unless-stopped
+
+  tools:                            # toolbox for one-off commands — nothing runs on the host
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: tools/Dockerfile
+    user: "${AIRFLOW_UID:-1000}"
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      DBT_PROFILES_DIR: /workspace/nomad_hub
+    volumes:
+      - .:/workspace
+      - ~/.aws:/home/nomad/.aws:ro
+      - ${NOMADHUB_KEY_DIR:-~/.nomadhub/keys}:/home/nomad/.nomadhub/keys:ro
 
 volumes:
   airflow-db:

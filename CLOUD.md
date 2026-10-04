@@ -26,15 +26,19 @@ Almost everything is code. You click through two sign-ups and paste one SQL bloc
 
 ## 0. Prerequisites
 
-| Tool | Check | Install |
-|---|---|---|
-| AWS CLI v2 | `aws --version` | https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html |
-| Terraform ≥ 1.6 | `terraform version` | https://developer.hashicorp.com/terraform/install |
-| OpenSSL | `openssl version` | preinstalled on Linux/macOS |
-| Python 3.11+ | `python3 --version` | `pip install "snowflake-connector-python>=3.12"` (for `scripts/run_sql.py`) |
+**Only Docker.** Nothing is installed or run on the host: Terraform, the AWS CLI, Python,
+dbt and OpenSSL all live in the project's **toolbox** container
+([`tools/Dockerfile`](tools/Dockerfile)), which mounts the repo plus `~/.aws` and
+`~/.nomadhub/keys` (read-only).
 
-The data must already be in `data/raw/` (see the README: `python data/download_sources.py all`
-then `python data/generate_data.py`).
+```bash
+docker compose build tools
+alias nh='docker compose run --rm tools'     # every command below: nh <command>
+nh terraform version && nh aws --version    # sanity check
+```
+
+The data must already be in `data/raw/` (see the README: `nh python data/download_sources.py all`
+then `nh python data/generate_data.py`).
 
 **Cost.** S3: ~6 GB ≈ $0.15/month. Snowflake: billed from the $400 trial credit; loading and
 transforming the full dataset on an X-Small warehouse uses a few credits. A resource monitor
@@ -60,13 +64,15 @@ them is then free and loads are faster. This guide uses **`eu-central-1` (Frankf
 4. **Configure a dedicated CLI profile** (keeps this project apart from your other AWS work):
 
    ```bash
-   aws configure --profile nomadhub
+   mkdir -p ~/.aws      # so Docker doesn't create it as root
+   # one-off writable mount of ~/.aws, just for this command:
+   docker compose run --rm -v ~/.aws:/home/nomad/.aws tools aws configure --profile nomadhub
    # AWS Access Key ID:     <from step 3>
    # AWS Secret Access Key: <from step 3>
    # Default region name:   eu-central-1
    # Default output format: json
 
-   aws sts get-caller-identity --profile nomadhub     # must print your account ID
+   nh aws sts get-caller-identity --profile nomadhub     # must print your account ID
    ```
 
 5. **Choose a bucket name.** S3 names are global, so add something personal:
@@ -92,16 +98,17 @@ Nothing in this project logs in to Snowflake with a password. Each service user 
 key pair; Snowflake stores only the public half.
 
 ```bash
-scripts/generate_snowflake_keys.sh
+mkdir -p ~/.nomadhub/keys
+docker compose run --rm -v ~/.nomadhub/keys:/out tools scripts/generate_snowflake_keys.sh /out
 ```
 
-This writes four key pairs to `~/.nomadhub/keys/` (outside the repo, `chmod 600`):
+This writes four key pairs to `~/.nomadhub/keys/` (outside the repo, `chmod 600`, owned by you):
 
 | User | Used by | Roles |
 |---|---|---|
 | `TERRAFORM_SVC` | Terraform | `ACCOUNTADMIN` |
 | `AIRFLOW_SVC` | Airflow (load + orchestration) | `LOADER_ROLE`, `DBT_ROLE` |
-| `DBT_SVC` | dbt from your laptop | `DBT_ROLE` |
+| `DBT_SVC` | dbt from the toolbox | `DBT_ROLE` |
 | `STREAMLIT_SVC` | dashboards, text-to-SQL | `ANALYST_ROLE` |
 
 At the end it prints the **TERRAFORM_SVC public key** as one long line — copy it.
@@ -136,11 +143,10 @@ Your account identifier is `ORGNAME-ACCOUNTNAME` — that's what connectors call
 ## 5. Terraform — create everything
 
 ```bash
-cd terraform
-cp terraform.tfvars.example terraform.tfvars    # then edit: bucket name + values from step 4
-terraform init
-terraform plan                                  # review: ~60 resources to add, 0 to change/destroy
-terraform apply                                 # type "yes"
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars   # then edit: bucket + values from step 4
+nh terraform -chdir=terraform init
+nh terraform -chdir=terraform plan      # review: ~60 resources to add, 0 to change/destroy
+nh terraform -chdir=terraform apply     # type "yes"
 ```
 
 `apply` takes about a minute. What it does, in order:
@@ -160,10 +166,10 @@ terraform apply                                 # type "yes"
 Check the outputs:
 
 ```bash
-terraform output
+nh terraform -chdir=terraform output
 ```
 
-The state file (`terraform.tfstate`) stays on your machine and is gitignored. Don't delete it —
+The state file (`terraform/terraform.tfstate`) stays on your machine and is gitignored. Don't delete it —
 it's how Terraform knows what it created.
 
 ---
@@ -171,7 +177,7 @@ it's how Terraform knows what it created.
 ## 6. Upload the data lake
 
 ```bash
-scripts/upload_raw.sh          # reads the bucket from `terraform output`
+nh scripts/upload_raw.sh       # reads the bucket from `terraform output`
 ```
 
 This runs `aws s3 sync data/raw/ s3://<bucket>/raw/`: ~1,200 files, ~6 GB. How long it
@@ -189,10 +195,11 @@ LIST @NOMAD_HUB.RAW.RAW_STAGE/flights/ PATTERN = '.*2025.*';   -- should list 12
 
 ## 7. Create the RAW tables and load them
 
+Set `SNOWFLAKE_ACCOUNT=ORGNAME-ACCOUNTNAME` in `.env` first (`nh terraform -chdir=terraform output -raw snowflake_account`).
+
 ```bash
-export SNOWFLAKE_ACCOUNT=$(terraform -chdir=terraform output -raw snowflake_account)
-python scripts/run_sql.py snowflake/01_raw_tables.sql      # 10 tables, all VARCHAR + lineage columns
-python scripts/run_sql.py snowflake/02_copy_into.sql       # COPY INTO from the stage
+nh python scripts/run_sql.py snowflake/01_raw_tables.sql   # 10 tables, all VARCHAR + lineage columns
+nh python scripts/run_sql.py snowflake/02_copy_into.sql    # COPY INTO from the stage
 ```
 
 You can also paste both files into a Snowsight worksheet instead.
@@ -225,13 +232,13 @@ has already loaded, so the next run (e.g. the daily Airflow DAG) loads only new 
 |---|---|
 | Pause compute | nothing — `NOMAD_WH` auto-suspends after 60 s idle |
 | See credit usage | Snowsight → *Admin → Cost Management*, or `SHOW RESOURCE MONITORS;` |
-| New data (new BTS month, new Airbnb snapshot) | `python data/download_sources.py all` → `scripts/upload_raw.sh` → `python scripts/run_sql.py snowflake/02_copy_into.sql` |
-| Change infra (e.g. warehouse size) | edit `terraform/*.tf` → `terraform plan` → `terraform apply` |
+| New data (new BTS month, new Airbnb snapshot) | `nh python data/download_sources.py all` → `nh scripts/upload_raw.sh` → the daily DAG (or `nh python scripts/run_sql.py snowflake/02_copy_into.sql`) |
+| Change infra (e.g. warehouse size) | edit `terraform/*.tf` → `nh terraform -chdir=terraform plan` → `… apply` |
 
 ## 9. Tear down
 
 ```bash
-cd terraform && terraform destroy
+nh terraform -chdir=terraform destroy
 ```
 
 This deletes the bucket **including its objects** (`force_destroy = true` — the data is
@@ -246,7 +253,7 @@ Your local `data/raw/` and `~/.nomadhub/keys/` are untouched.
 | Symptom | Cause → fix |
 |---|---|
 | `terraform plan`: *JWT token is invalid* | The public key in step 4 doesn't match `~/.nomadhub/keys/terraform_svc_rsa_key.p8`, or org/account names are wrong. Re-run the last query of the bootstrap SQL and compare. |
-| `terraform plan`: *NoCredentialProviders* / *profile not found* | AWS profile missing: `aws configure --profile nomadhub`, or set `aws_profile` in `terraform.tfvars`. |
+| `terraform plan`: *NoCredentialProviders* / *profile not found* | AWS profile missing: re-run the `aws configure --profile nomadhub` command from step 1, or set `aws_profile` in `terraform.tfvars`. |
 | `apply`: *BucketAlreadyExists* | Bucket names are global — choose another `bucket_name`. |
 | `LIST @RAW_STAGE`: *Access Denied* / *not authorized to perform sts:AssumeRole* | IAM changes can take ~1 min to propagate; retry. If it persists, run `terraform apply` again — it re-syncs the trust policy with the integration. Never `CREATE OR REPLACE` the integration by hand: that generates a new external ID and breaks the trust. |
 | `COPY`: *Number of columns in file does not match* | A file in that folder has a different layout. All files of one table must share the header that `01_raw_tables.sql` was generated from. |

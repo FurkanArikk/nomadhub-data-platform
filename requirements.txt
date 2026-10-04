@@ -1,5 +1,5 @@
-# Local development environment (Airflow runs in Docker with its own image).
-#   python -m venv .venv && .venv/bin/pip install -r requirements.txt
+# Python dependencies of the toolbox image (tools/Dockerfile). Nothing is installed on the host:
+#   docker compose run --rm tools <command>
 
 # data: downloaders + synthetic generator
 requests>=2.31
