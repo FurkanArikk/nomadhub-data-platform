@@ -20,12 +20,13 @@ Usage:
     python data/download_sources.py bts --start 2019-01 --end 2025-12 --workers 4
     python data/download_sources.py airbnb --cities paris istanbul tokyo
     python data/download_sources.py ourairports
+    python data/download_sources.py fx                    # ECB rates -> nomad_hub/seeds/fx_rates_daily.csv
 """
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from sources import airbnb, bts, ourairports
+from sources import airbnb, bts, ecb, ourairports
 from sources.common import MANIFEST_PATH, update_manifest
 from tqdm import tqdm
 
@@ -79,6 +80,12 @@ def run_ourairports() -> None:
     report(results)
 
 
+def run_fx() -> None:
+    print("\n💱 ECB exchange rates → dbt seed")
+    info = ecb.build_seed()
+    print(f"  ✅ {info['path']:<60} {info['rows']:>12,} rows  ({info['first_date']} → {info['last_date']})")
+
+
 def report(results: list[dict]) -> None:
     new = [r for r in results if r["status"] == "downloaded"]
     cached = len(results) - len(new)
@@ -90,7 +97,7 @@ def report(results: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download NomadHub public source data")
-    parser.add_argument("source", choices=["all", "bts", "airbnb", "ourairports"])
+    parser.add_argument("source", choices=["all", "bts", "airbnb", "ourairports", "fx"])
     parser.add_argument("--sample", action="store_true",
                         help=f"small dev set: BTS {SAMPLE_MONTHS[0]} + cities {SAMPLE_CITIES}")
     parser.add_argument("--start", default="2019-01", help="first BTS month (YYYY-MM)")
@@ -111,6 +118,8 @@ def main() -> None:
         run_airbnb(cities, args.workers, args.keep_cache)
     if args.source in ("all", "bts"):
         run_bts(start, end, args.workers, args.keep_cache)
+    if args.source in ("all", "fx"):
+        run_fx()
 
     print(f"\n📒 Manifest: {MANIFEST_PATH}")
     print("   Next: upload data/raw/ to s3://<bucket>/raw/ (same layout)\n")
