@@ -1,7 +1,6 @@
 name: 'nomad_hub'
-version: '1.0.0'
+version: '2.0.0'
 config-version: 2
-
 profile: 'nomad_hub'
 
 model-paths: ["models"]
@@ -11,58 +10,45 @@ seed-paths: ["seeds"]
 macro-paths: ["macros"]
 snapshot-paths: ["snapshots"]
 
-clean-targets:
-  - "target"
-  - "dbt_packages"
+clean-targets: ["target", "dbt_packages"]
 
-# ── Global model configuration ─────────────────────────────────────────────────
+# ── Layers ────────────────────────────────────────────────────────────────────
+#   STAGING  one view per RAW table: typed, cleaned, deduplicated (+ seeds)
+#   MARTS    dimensions (tables), incremental facts (MERGE), business marts (tables)
 models:
   nomad_hub:
-
-    # Silver layer — staging views
     staging:
       +schema: STAGING
       +materialized: view
-      +tags: ["staging", "silver"]
-
-    # Gold layer — marts
+      +tags: ["staging"]
     marts:
       +schema: MARTS
-      +tags: ["marts", "gold"]
-
       dimensions:
         +materialized: table
         +tags: ["dimension"]
-
       facts:
         +materialized: incremental
         +incremental_strategy: merge
-        +tags: ["fact", "incremental"]
-
-      business_marts:
+        +on_schema_change: append_new_columns
+        +tags: ["fact"]
+      business:
         +materialized: table
         +tags: ["mart"]
 
-      ai:
-        +schema: AI
-        +materialized: table
-        +tags: ["ai"]
-
-# ── Snapshot configuration ─────────────────────────────────────────────────────
-snapshots:
-  nomad_hub:
-    +target_schema: MARTS
-    +strategy: timestamp
-    +updated_at: updated_at
-
-# ── Seeds ──────────────────────────────────────────────────────────────────────
 seeds:
   nomad_hub:
-    +schema: RAW
+    +schema: STAGING
+    +tags: ["seed"]
+    fx_rates_daily:
+      +column_types:
+        rate_date: date
+        currency_code: varchar(3)
+        usd_per_unit: number(18,8)
+    airlines:
+      +column_types:
+        airline_code: varchar(3)
+        parent_airline_code: varchar(3)
 
-# ── Variables ─────────────────────────────────────────────────────────────────
 vars:
-  # Lookback window for incremental models (overrideable at runtime)
-  incremental_lookback_days: 3
-  # Start date for date spine
-  date_spine_start: '2021-01-01'
+  date_spine_start: '2014-01-01'
+  date_spine_end: '2027-12-31'

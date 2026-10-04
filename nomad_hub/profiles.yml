@@ -1,0 +1,20 @@
+# No secrets in here — safe to commit. Authentication is key-pair only:
+#   SNOWFLAKE_ACCOUNT        ORGNAME-ACCOUNTNAME  (terraform output -raw snowflake_account)
+#   DBT_SNOWFLAKE_USER       default DBT_SVC (Airflow sets AIRFLOW_SVC)
+#   DBT_PRIVATE_KEY_PATH     default ~/.nomadhub/keys/dbt_svc_rsa_key.p8
+# Run from this folder (dbt picks up ./profiles.yml) or pass --profiles-dir nomad_hub.
+nomad_hub:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('DBT_SNOWFLAKE_USER', 'DBT_SVC') }}"
+      private_key_path: "{{ env_var('DBT_PRIVATE_KEY_PATH', env_var('HOME', '') ~ '/.nomadhub/keys/dbt_svc_rsa_key.p8') }}"
+      role: DBT_ROLE
+      warehouse: NOMAD_WH
+      database: NOMAD_HUB
+      schema: STAGING          # default; each layer sets its own schema in dbt_project.yml
+      threads: 8
+      query_tag: dbt-nomad_hub
+      client_session_keep_alive: false

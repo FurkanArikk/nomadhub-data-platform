@@ -1,0 +1,110 @@
+version: 2
+
+models:
+  - name: stg_bts__flights
+    description: "One row per US domestic flight (BTS). Local clock times; actual times = scheduled + reported delay."
+    columns:
+      - name: flight_id
+        description: "Surrogate key: date + airline + flight number + route + scheduled departure (macro flight_key)."
+        data_tests: [unique, not_null]
+      - name: flight_date
+        data_tests: [not_null]
+      - name: airline_code
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('airlines'), field: airline_code}}
+      - name: arrival_status
+        data_tests:
+          - accepted_values: {arguments: {values: ['on_time', 'delayed', 'cancelled', 'diverted']}}
+      - name: cancellation_reason
+        data_tests:
+          - accepted_values: {arguments: {values: ['carrier', 'weather', 'national_air_system', 'security']}}
+
+  - name: stg_airbnb__listings
+    description: "Latest snapshot of every listing. price_local is in currency_code (local currency)."
+    columns:
+      - name: listing_id
+        data_tests: [unique, not_null]
+      - name: city
+        data_tests:
+          - relationships: {arguments: {to: ref('cities'), field: city}}
+      - name: currency_code
+        data_tests: [not_null]
+      - name: room_type
+        data_tests:
+          - accepted_values: {arguments: {values: ['Entire home/apt', 'Private room', 'Shared room', 'Hotel room']}}
+
+  - name: stg_airbnb__calendar
+    description: "365-day forward availability from each city's latest snapshot."
+    columns:
+      - name: listing_id
+        data_tests: [not_null]
+      - name: calendar_date
+        data_tests: [not_null]
+
+  - name: stg_airbnb__reviews
+    description: "Real reviews, one row per review_id, HTML cleaned."
+    columns:
+      - name: review_id
+        data_tests: [unique, not_null]
+      - name: review_date
+        data_tests: [not_null]
+
+  - name: stg_ourairports__airports
+    columns:
+      - name: airport_id
+        data_tests: [unique, not_null]
+
+  - name: stg_ourairports__countries
+    columns:
+      - name: country_code
+        data_tests: [unique, not_null]
+
+  - name: stg_ourairports__regions
+    columns:
+      - name: region_code
+        data_tests: [unique, not_null]
+
+  - name: stg_app__users
+    description: "Platform users — pseudonymised real reviewers (synthetic attributes)."
+    columns:
+      - name: user_id
+        data_tests: [unique, not_null]
+      - name: email
+        data_tests: [unique, not_null]
+      - name: source_reviewer_id
+        data_tests: [unique]
+
+  - name: stg_app__stay_bookings
+    columns:
+      - name: stay_booking_id
+        data_tests: [unique, not_null]
+      - name: user_id
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('stg_app__users'), field: user_id}}
+      - name: booking_status
+        data_tests:
+          - accepted_values: {arguments: {values: ['completed', 'cancelled']}}
+      - name: total_amount_local
+        data_tests:
+          - dbt_utils.accepted_range: {arguments: {min_value: 0}}
+
+  - name: stg_app__flight_bookings
+    columns:
+      - name: flight_booking_id
+        data_tests: [unique, not_null]
+      - name: flight_id
+        description: "Joins to the real flight in stg_bts__flights."
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('stg_bts__flights'), field: flight_id}}
+      - name: stay_booking_id
+        data_tests:
+          - relationships: {arguments: {to: ref('stg_app__stay_bookings'), field: stay_booking_id}}
+      - name: booking_status
+        data_tests:
+          - accepted_values: {arguments: {values: ['flown', 'cancelled_by_airline', 'cancelled_by_customer']}}
+      - name: leg
+        data_tests:
+          - accepted_values: {arguments: {values: ['outbound', 'return']}}

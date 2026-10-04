@@ -1,0 +1,35 @@
+version: 2
+
+sources:
+  - name: raw
+    database: NOMAD_HUB
+    schema: RAW
+    description: >
+      Bronze layer: files from s3://<bucket>/raw/ loaded as-is by snowflake/02_copy_into.sql.
+      Every source column is VARCHAR; _SOURCE_FILE and _LOADED_AT are added on load.
+    config:
+      loaded_at_field: _loaded_at
+      freshness:
+        warn_after: {count: 35, period: day}
+
+    tables:
+      - name: flights
+        description: "BTS Reporting Carrier On-Time Performance — every US domestic flight 2019–2025."
+      - name: listings
+        description: "Inside Airbnb listings, one file per city snapshot. Price is in local currency."
+      - name: calendar
+        description: "Inside Airbnb 365-day forward availability per listing."
+      - name: reviews
+        description: "Inside Airbnb reviews. Each snapshot repeats the full history."
+      - name: airports
+        description: "OurAirports airport catalogue."
+      - name: countries
+        description: "OurAirports ISO countries."
+      - name: regions
+        description: "OurAirports first-level regions (US states, provinces)."
+      - name: users
+        description: "Synthetic: one pseudonymised user per real Airbnb reviewer."
+      - name: stay_bookings
+        description: "Synthetic: one completed stay per real review, plus cancelled bookings."
+      - name: flight_bookings
+        description: "Synthetic: users booked onto real BTS flights for US trips."

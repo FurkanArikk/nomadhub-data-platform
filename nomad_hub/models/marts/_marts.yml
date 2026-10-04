@@ -1,0 +1,128 @@
+version: 2
+
+models:
+  # ── Dimensions ─────────────────────────────────────────────────────────────
+  - name: dim_date
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
+
+  - name: dim_cities
+    columns:
+      - name: city
+        data_tests: [unique, not_null]
+
+  - name: dim_airports
+    columns:
+      - name: iata_code
+        data_tests: [unique, not_null]
+
+  - name: dim_airlines
+    columns:
+      - name: airline_code
+        data_tests: [unique, not_null]
+
+  - name: dim_listings
+    columns:
+      - name: listing_id
+        data_tests: [unique, not_null]
+      - name: price_band
+        data_tests:
+          - accepted_values: {arguments: {values: ['budget', 'mid', 'upscale', 'luxury']}}
+
+  - name: dim_users
+    columns:
+      - name: user_id
+        data_tests: [unique, not_null]
+      - name: email
+        data_tests: [unique]
+
+  # ── Facts ──────────────────────────────────────────────────────────────────
+  - name: fct_flights
+    description: "Every US domestic flight 2019–2025 (BTS). Incremental MERGE on flight_id."
+    columns:
+      - name: flight_id
+        data_tests: [unique, not_null]
+      - name: airline_code
+        data_tests:
+          - relationships: {arguments: {to: ref('dim_airlines'), field: airline_code}}
+      - name: origin_airport
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_airports'), field: iata_code}
+              config: {severity: warn}     # a few tiny BTS airports may be missing from OurAirports
+
+  - name: fct_stay_bookings
+    description: "Stay bookings with local and USD amounts. Incremental MERGE on stay_booking_id."
+    columns:
+      - name: stay_booking_id
+        data_tests: [unique, not_null]
+      - name: user_id
+        data_tests:
+          - relationships: {arguments: {to: ref('dim_users'), field: user_id}}
+      - name: listing_id
+        data_tests:
+          - relationships: {arguments: {to: ref('dim_listings'), field: listing_id}}
+      - name: total_amount_usd
+        description: "NULL would mean a missing FX rate for the booking date."
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range: {arguments: {min_value: 0}}
+      - name: lead_time_days
+        data_tests:
+          - dbt_utils.accepted_range: {arguments: {min_value: 0}}
+
+  - name: fct_flight_bookings
+    description: "Booked flight legs, each tied to its real BTS flight."
+    columns:
+      - name: flight_booking_id
+        data_tests: [unique, not_null]
+      - name: flight_id
+        data_tests:
+          - relationships: {arguments: {to: ref('fct_flights'), field: flight_id}}
+      - name: stay_booking_id
+        data_tests:
+          - relationships: {arguments: {to: ref('fct_stay_bookings'), field: stay_booking_id}}
+
+  # ── Business marts ─────────────────────────────────────────────────────────
+  - name: mart_airline_performance
+    description: "On-time, cancellation and delay-cause metrics by month × airline × origin airport."
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments: {combination_of_columns: [month, airline_code, origin_airport]}
+    columns:
+      - name: on_time_rate
+        data_tests:
+          - dbt_utils.accepted_range: {arguments: {min_value: 0, max_value: 1}}
+
+  - name: mart_city_revenue
+    description: "Bookings, nights, GBV, platform revenue and ADR (USD) by month × city × room type."
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments: {combination_of_columns: [month, city, room_type]}
+
+  - name: mart_traveler_disruption
+    description: "How often booked legs hit real cancellations/delays, by month × airline × leg."
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments: {combination_of_columns: [month, airline_code, leg]}
+
+  - name: mart_forward_occupancy
+    description: "Forward 12-month occupancy proxy from the Airbnb calendar, by month × city × room type."
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments: {combination_of_columns: [month, city, room_type]}
+    columns:
+      - name: occupancy_proxy
+        data_tests:
+          - dbt_utils.accepted_range: {arguments: {min_value: 0, max_value: 1}}
+
+  - name: mart_user_cohorts
+    description: "Repeat-booking retention by first-booking cohort month."
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments: {combination_of_columns: [cohort_month, months_since_first_booking]}
+    columns:
+      - name: retention_rate
+        data_tests:
+          - dbt_utils.accepted_range: {arguments: {min_value: 0, max_value: 1}}

@@ -1,0 +1,13 @@
+snapshots:
+  - name: snap_listings
+    description: >
+      SCD2 history of listing price and capacity. Each new Inside Airbnb snapshot loaded
+      into RAW (e.g. next quarter) that changes a tracked column closes the old row
+      (dbt_valid_to) and opens a new one — price history the source itself doesn't keep.
+    relation: ref('stg_airbnb__listings')
+    config:
+      schema: SNAPSHOTS
+      unique_key: listing_id
+      strategy: check
+      check_cols: [price_local, room_type, accommodates, minimum_nights, is_superhost]
+      hard_deletes: invalidate
