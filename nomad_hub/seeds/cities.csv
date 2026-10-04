@@ -1,0 +1,21 @@
+city,city_name,country_code,currency_code,is_us
+new_york,New York,US,USD,true
+los_angeles,Los Angeles,US,USD,true
+san_francisco,San Francisco,US,USD,true
+chicago,Chicago,US,USD,true
+seattle,Seattle,US,USD,true
+boston,Boston,US,USD,true
+austin,Austin,US,USD,true
+washington_dc,Washington DC,US,USD,true
+new_orleans,New Orleans,US,USD,true
+hawaii,Hawaii,US,USD,true
+london,London,GB,GBP,false
+paris,Paris,FR,EUR,false
+istanbul,Istanbul,TR,TRY,false
+barcelona,Barcelona,ES,EUR,false
+madrid,Madrid,ES,EUR,false
+amsterdam,Amsterdam,NL,EUR,false
+munich,Munich,DE,EUR,false
+rome,Rome,IT,EUR,false
+lisbon,Lisbon,PT,EUR,false
+tokyo,Tokyo,JP,JPY,false
