@@ -12,7 +12,7 @@ authors = [{ name = "FurkanArikk" }]
 keywords = ["data-engineering", "snowflake", "dbt", "airflow", "terraform", "gemini", "rag", "streamlit"]
 
 [project.urls]
-Repository = "https://github.com/FurkanArikk/zomata_data_eng"
+Repository = "https://github.com/FurkanArikk/nomadhub-data-platform"
 
 [tool.ruff]
 line-length = 100
