@@ -1,9 +1,9 @@
 # NomadHub — AI-powered travel data platform
 
-An end-to-end data platform for a fictional travel company, built on **~294 million rows of
-real public data**: every US domestic flight from 2019–2025, Airbnb listings, calendars and
-reviews for 20 cities, the world's airports, and daily exchange rates. A synthetic booking
-layer is generated **on top of** those real events.
+An end-to-end data platform for a fictional travel company, holding **~294 million rows**:
+**~257M rows of real public data** (every US domestic flight from 2019–2025, Airbnb listings,
+calendars and reviews for 20 cities, the world's airports, daily exchange rates) plus a
+**37M-row synthetic booking layer** generated on top of those real events.
 
 **S3 → Snowflake → dbt → Airflow → Gemini (enrichment · RAG · text-to-SQL) → Streamlit**,
 with the cloud side fully in **Terraform**.
